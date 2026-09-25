@@ -1,0 +1,2963 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>钢镚 · 机器狗控制台</title>
+<style>
+:root{
+  --bg:#f3f5f9;--panel:#fff;--panel2:#eef1f6;--fg:#1a2233;--dim:#5b6779;--dim2:#8a94a3;
+  --line:#e2e7ef;--accent:#2f7ef7;--accent-soft:#2f7ef71f;--cyan:#0891b2;--ok:#16a34a;
+  --ok-soft:#16a34a22;--warn:#d97706;--err:#dc2626;--err-soft:#dc26261a;
+  --r:14px;--r-pill:999px;--mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+  --shadow:0 1px 2px #0001,0 6px 20px #0000000d;--shadow-lg:0 2px 6px #0001,0 16px 44px #00000014;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#0f1420;--panel:#161d2b;--panel2:#1e2636;--fg:#e8edf6;--dim:#94a1b6;--dim2:#5b6779;
+    --line:#26303f;--accent:#4d92ff;--accent-soft:#4d92ff26;--cyan:#22d3ee;--ok:#35c26b;
+    --ok-soft:#35c26b26;--warn:#ffb020;--err:#ff4d4f;--err-soft:#ff4d4f1a;
+    --shadow:0 1px 2px #0004,0 6px 20px #0006;--shadow-lg:0 2px 6px #0005,0 16px 44px #0008}
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;height:100dvh;position:fixed;inset:0;overflow:hidden;
+  overscroll-behavior:none;background:var(--bg);color:var(--fg);
+  font:14px/1.45 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-user-select:none;user-select:none}
+input,textarea,select{-webkit-user-select:text;user-select:text;font:inherit;color:inherit}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+.ic{width:1.15em;height:1.15em;fill:none;stroke:currentColor;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round;display:inline-block;vertical-align:-.15em}
+
+/* ---- top ---- */
+#top{position:fixed;top:0;left:0;right:0;z-index:40;height:54px;display:none;align-items:center;
+  gap:10px;padding:0 14px;padding-top:env(safe-area-inset-top);
+  background:color-mix(in srgb,var(--panel) 92%,transparent);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--line)}
+#top.show{display:flex}
+#top::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:1px;
+  background:linear-gradient(90deg,transparent,var(--accent),var(--cyan),transparent);opacity:.45}
+#back{width:36px;height:36px;border-radius:50%;background:var(--panel2);display:flex;align-items:center;justify-content:center}
+#title{font-weight:650;font-size:16px;letter-spacing:-.2px}
+#menu{flex:1;display:flex;align-items:center;gap:8px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.mbtn{flex:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  padding:8px 14px;min-height:34px;border-radius:var(--r-pill);
+  background:var(--panel2);color:var(--fg);font-size:13px;font-weight:600;line-height:1.2;
+  border:1px solid var(--line);box-shadow:none;white-space:nowrap;
+  transition:background .15s,color .15s,border-color .15s,opacity .15s,box-shadow .15s}
+.mbtn.primary{background:var(--accent);color:#fff;border-color:transparent;
+  box-shadow:0 2px 10px color-mix(in srgb,var(--accent) 28%,transparent)}
+.mbtn.ok{background:var(--ok-soft);color:var(--ok);
+  border-color:color-mix(in srgb,var(--ok) 40%,var(--line))}
+.mbtn.danger{background:var(--err-soft);color:var(--err);
+  border-color:color-mix(in srgb,var(--err) 45%,var(--line))}
+.mbtn.armed{border-color:var(--warn);color:var(--warn);box-shadow:0 0 0 2px color-mix(in srgb,var(--warn) 35%,transparent)}
+.mbtn.next{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 50%,transparent)}
+.mbtn.danger.next{box-shadow:0 0 0 2px color-mix(in srgb,var(--err) 45%,transparent)}
+.mbtn.ok.next{box-shadow:0 0 0 2px color-mix(in srgb,var(--ok) 45%,transparent)}
+/* 禁用：保留可读文字，不要叠 opacity+灰度把字洗没 */
+.mbtn:disabled,.mbtn.is-off{
+  opacity:1;pointer-events:none;cursor:not-allowed;filter:none;
+  background:var(--panel2);color:var(--dim2);
+  border-color:var(--line);box-shadow:none}
+.mbtn.primary:disabled,.mbtn.primary.is-off,
+.mbtn.ok:disabled,.mbtn.ok.is-off,
+.mbtn.danger:disabled,.mbtn.danger.is-off,
+.mbtn.ghost:disabled,.mbtn.ghost.is-off{
+  background:var(--panel2);color:var(--dim2);border-color:var(--line);box-shadow:none}
+.mbtn.ghost{background:var(--panel2);color:var(--dim);border-color:var(--line);box-shadow:none}
+#menu input#mapName{flex:none;width:110px;min-height:34px;padding:7px 12px;border-radius:var(--r-pill);
+  border:1px solid var(--line);background:var(--panel2);color:var(--fg);outline:none}
+#menu input#mapName:focus{border-color:var(--accent)}
+#status{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim);flex:none}
+.chip{display:inline-flex;align-items:center;gap:5px;background:var(--panel2);border-radius:var(--r-pill);
+  padding:5px 10px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip b{color:var(--fg);font-weight:600}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--dim2)}
+.dot.on{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
+.dot.off{background:var(--err)}
+
+/* ---- home ---- */
+#home{position:fixed;inset:0;z-index:30;display:none;grid-template-columns:1fr 1fr;
+  gap:18px;padding:18px;padding-top:calc(18px + env(safe-area-inset-top));
+  background:
+    radial-gradient(900px 520px at 8% -8%,#2f7ef726,transparent 60%),
+    radial-gradient(700px 480px at 92% 108%,#22d3ee1f,transparent 55%),
+    linear-gradient(165deg,#eef2f8 0%,#f6f8fc 45%,#e9eef7 100%)}
+#home.show{display:grid}
+#hLeft{background:linear-gradient(180deg,#ffffffee,#f7f9fdee);border-radius:24px;box-shadow:var(--shadow-lg);
+  padding:18px;border:1px solid #ffffffaa;display:flex;flex-direction:column;min-height:0;overflow:hidden;height:100%;
+  position:relative}
+#hLeft::before{content:'';position:absolute;left:18px;right:18px;top:0;height:3px;border-radius:0 0 4px 4px;
+  background:linear-gradient(90deg,#2f7ef7,#22d3ee,#7c3aed)}
+#hHead{display:flex;align-items:center;gap:12px;padding-bottom:14px;border-bottom:1px solid var(--line);flex:none}
+#hHead .logo{width:50px;height:50px;border-radius:16px;display:flex;align-items:center;justify-content:center;
+  color:#fff;background:linear-gradient(140deg,#2f7ef7 10%,#22d3ee 90%);box-shadow:0 8px 22px #2f7ef755}
+#hLeft h2{margin:0;font-size:20px;font-weight:700;letter-spacing:-.3px}
+#hLeft .sub{color:var(--dim);font-size:12.5px;margin-top:4px;display:flex;align-items:center;gap:6px}
+#hClock{margin-top:14px;padding:16px 18px;border-radius:16px;border:1px solid #dbe7fb;
+  background:linear-gradient(125deg,#e8f1ff 0%,#eef7ff 40%,#f4f7fb 100%);
+  display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none;
+  box-shadow:inset 0 1px 0 #fff8}
+#hClock .clkMain{min-width:0}
+#hTime{font:300 30px/1 var(--mono);letter-spacing:1.5px;background:linear-gradient(90deg,#1a2233,#2f7ef7);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+#hDate{margin-top:7px;font-size:13px;font-weight:650;color:var(--dim)}
+#hUptime{text-align:right;flex:none;padding-left:16px;border-left:1px solid #c9daf5}
+#hUptime .uk{font-size:12px;color:var(--dim)}
+#hUptime .uv{margin-top:6px;font:700 20px/1.15 var(--mono);color:#2f7ef7;letter-spacing:.3px}
+#hTiles{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:repeat(3,1fr);gap:12px;margin-top:14px;flex:1;min-height:0}
+.tile{background:linear-gradient(160deg,#fff,#f4f7fb);border:1px solid #e6ebf3;border-radius:18px;
+  padding:16px 16px 16px 18px;display:flex;gap:12px;align-items:center;min-height:0;height:100%;
+  box-shadow:0 2px 8px #1a223308;position:relative;overflow:hidden;transition:transform .15s,box-shadow .15s}
+.tile::before{content:'';position:absolute;left:0;top:12px;bottom:12px;width:4px;border-radius:0 4px 4px 0;
+  background:var(--accent);opacity:.85}
+.tile:hover{transform:translateY(-1px);box-shadow:0 8px 20px #1a223312}
+#tileMode::before{background:#2f7ef7}#tileCtrl::before{background:#7c3aed}
+#tileCpu::before{background:#0891b2}#tileMem::before{background:#d97706}
+#tileDisk::before{background:#64748b}#tileBatt::before{background:#16a34a}
+.tile .tic{width:48px;height:48px;border-radius:14px;display:flex;align-items:center;justify-content:center;flex:none;
+  box-shadow:inset 0 1px 0 #fff6}
+.tile .tic svg{width:26px;height:26px}
+.tile .meta{min-width:0;flex:1}
+.tile .k{font-size:12.5px;color:var(--dim);font-weight:600;letter-spacing:.2px}
+.tile .v{margin-top:6px;font:700 22px/1.15 var(--mono);color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .bar{margin-top:9px;height:7px;border-radius:99px;background:#e5eaf2;overflow:hidden;box-shadow:inset 0 1px 2px #0001}
+.tile .bar>i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),#22d3ee);width:0%;transition:width .35s,background .25s}
+.tile.ok .bar>i{background:linear-gradient(90deg,#16a34a,#4ade80)}
+.tile.warn .bar>i{background:linear-gradient(90deg,#ca8a04,#fbbf24)}
+.tile.mid .bar>i{background:linear-gradient(90deg,#ea580c,#fb923c)}
+.tile.err .bar>i{background:linear-gradient(90deg,var(--err),#fb7185)}
+.tile.ok .v{color:var(--ok)}
+.tile.warn .v{color:var(--warn)}
+.tile.mid .v{color:#ea580c}
+.tile.err .v{color:var(--err)}
+.tileAct{flex:none;align-self:center;padding:9px 14px;border-radius:12px;font-size:13px;font-weight:700;
+  background:linear-gradient(140deg,#2f7ef7,#4d92ff);color:#fff;box-shadow:0 4px 14px #2f7ef755;white-space:nowrap;
+  letter-spacing:.3px}
+.tileAct.app{background:linear-gradient(140deg,#7c3aed,#a78bfa);box-shadow:0 4px 14px #7c3aed55}
+.tileAct.sdk{background:linear-gradient(140deg,#16a34a,#4ade80);box-shadow:0 4px 14px #16a34a55}
+.tileAct:hover{filter:brightness(1.05)}.tileAct:active{transform:scale(.96)}
+#hChips{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px;flex:none}
+#hChips .chip{background:#fff;border:1px solid var(--line);box-shadow:0 1px 3px #0001;font-size:12px;padding:6px 11px}
+#hRight{display:flex;flex-direction:column;gap:14px;min-height:0;height:100%;align-self:stretch}
+.hbtn{position:relative;display:flex;align-items:center;gap:18px;padding:0 26px;border-radius:22px;
+  background:linear-gradient(135deg,#ffffff 0%,#f7f9fc 100%);border:1px solid #e4eaf3;
+  box-shadow:0 4px 18px #1a22330d;text-align:left;
+  transition:transform .18s,border-color .18s,box-shadow .18s;flex:1 1 0;min-height:0;overflow:hidden}
+.hbtn::after{content:'';position:absolute;right:-40px;top:-40px;width:120px;height:120px;border-radius:50%;
+  background:radial-gradient(circle,var(--accent-soft),transparent 70%);opacity:.9;pointer-events:none}
+.hbtn:hover{border-color:#b8d0ff;transform:translateY(-2px);box-shadow:0 12px 28px #2f7ef722}
+.hbtn:active{transform:translateY(0)}
+.hbtn .ico{width:64px;height:64px;border-radius:18px;display:flex;align-items:center;justify-content:center;
+  flex:none;box-shadow:0 6px 16px #00000012;position:relative;z-index:1}
+.hbtn .ico svg{width:32px;height:32px}
+.hbtn .ico.nav{background:linear-gradient(145deg,#e8f1ff,#d4e6ff);color:#2f7ef7}
+.hbtn .ico.map{background:linear-gradient(145deg,#e0f7fa,#c5f0f6);color:#0891b2}
+.hbtn .ico.lib{background:linear-gradient(145deg,#f3e8ff,#e9d5ff);color:#7c3aed}
+.hbtn .ico.set{background:linear-gradient(145deg,#eef2f7,#e2e8f0);color:#475569}
+.hbtn .txt{min-width:0;flex:1;position:relative;z-index:1}
+.hbtn b{display:block;font-size:23px;letter-spacing:-.3px;font-weight:750}
+.hbtn small{display:block;margin-top:7px;color:var(--dim);font-size:14.5px;line-height:1.45}
+.hbtn .live{margin-left:auto;font-size:13px;color:var(--accent);font-weight:700;white-space:nowrap;
+  padding:9px 14px;border-radius:999px;background:linear-gradient(135deg,#eaf2ff,#dcebff);
+  border:1px solid #c9dcff;position:relative;z-index:1}
+#hFlow{margin-top:12px;padding:13px 15px;border-radius:14px;
+  background:linear-gradient(120deg,#f0f5ff,#f6f8fb);border:1px solid #e0e8f5;
+  font-size:12.5px;color:var(--dim);line-height:1.65;flex:none}
+#hFlow b{color:var(--fg)}
+@media (prefers-color-scheme:dark){
+  #home{background:
+    radial-gradient(900px 520px at 8% -8%,#2f7ef733,transparent 60%),
+    radial-gradient(700px 480px at 92% 108%,#22d3ee22,transparent 55%),
+    linear-gradient(165deg,#0c1220,#121a2a)}
+  #hLeft{background:linear-gradient(180deg,#1a2334ee,#161d2b);border-color:#26303f}
+  #hClock{background:linear-gradient(125deg,#1a2740,#1e2636);border-color:#2a3a55}
+  #hTime{background:linear-gradient(90deg,#e8edf6,#4d92ff);-webkit-background-clip:text;background-clip:text}
+  .tile{background:linear-gradient(160deg,#1e2636,#1a2230);border-color:#2a3444}
+  .tile .bar{background:#2a3444}
+  .hbtn{background:linear-gradient(135deg,#1c2434,#161d2b);border-color:#2a3444}
+  .hbtn .live{background:linear-gradient(135deg,#1a2a44,#1e3050);border-color:#2f4a70;color:#8bb6ff}
+  .hbtn .ico.nav{background:linear-gradient(145deg,#1a2c48,#152238);color:#6aa6ff}
+  .hbtn .ico.map{background:linear-gradient(145deg,#143038,#102428);color:#22d3ee}
+  .hbtn .ico.lib{background:linear-gradient(145deg,#2a1f44,#221833);color:#a78bfa}
+  .hbtn .ico.set{background:linear-gradient(145deg,#232b38,#1a2230);color:#94a3b8}
+  #hChips .chip{background:#1a2230;border-color:#2a3444}
+  #hFlow{background:linear-gradient(120deg,#1a2436,#161d2b);border-color:#2a3444}
+  #tileCtrl .tic{background:#a78bfa22!important;color:#a78bfa!important}
+}
+/* ---- map 3d / video ---- */
+#map3dWrap{position:absolute;inset:54px 0 0 0;display:none;background:#070b12;z-index:1}
+#map3dWrap.show{display:block}
+#map3d{width:100%;height:100%;display:block;touch-action:none}
+#map3dWait{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:#4d92ff;font-size:15px;pointer-events:none;letter-spacing:.2px}
+#map3dWait.hide{display:none}
+#cv.mapHidden{visibility:hidden;pointer-events:none}
+#mapVideo{position:absolute;right:14px;top:68px;z-index:7;width:min(280px,32vw);aspect-ratio:16/10;
+  border-radius:14px;overflow:hidden;border:1px solid #2a3648;background:#0a1018;
+  box-shadow:0 8px 28px #0008;display:none}
+#mapVideo.show{display:block}
+#mapVideo img{width:100%;height:100%;object-fit:cover;display:block;background:#000}
+#mapVideo .mvCap{position:absolute;left:8px;bottom:6px;font-size:11px;color:#c9d4e3;
+  background:#0f1724aa;padding:3px 8px;border-radius:999px}
+#sideInfo.mapMode{top:68px;width:min(280px,70vw);z-index:8}
+#stage.mapRoute #tools{display:none}
+#stage.mapRoute #hintStrip{top:auto;bottom:178px;z-index:8}
+#estopTop{display:inline-flex;align-items:center;justify-content:center;
+  width:auto;min-width:40px;height:34px;padding:0 10px;border-radius:999px;flex:none;
+  background:radial-gradient(circle at 30% 28%,#ff7a7c,#c22528);
+  color:#fff;font-weight:700;font-size:12px;letter-spacing:.5px;
+  border:1px solid #ffb4b6;box-shadow:0 2px 10px #ff4d4f55;line-height:1;white-space:nowrap}
+#estopTop:active{transform:scale(.96)}
+#estopFloat{display:none}
+/* ---- stage ---- */
+#stage{position:fixed;inset:0;display:none;background:#0b1018;padding-top:54px}
+#stage.show{display:block}
+#cv{position:absolute;inset:54px 0 0 0;width:100%;height:calc(100% - 54px);touch-action:none;cursor:default}
+#cv.cross{cursor:crosshair}
+#hintStrip{position:absolute;top:68px;left:50%;transform:translateX(-50%);z-index:6;
+  background:color-mix(in srgb,var(--panel) 92%,transparent);border:1px solid color-mix(in srgb,var(--accent) 40%,var(--line));
+  color:var(--fg);padding:8px 16px;border-radius:var(--r-pill);font-size:13px;max-width:min(92vw,520px);
+  text-align:center;box-shadow:var(--shadow);pointer-events:none}
+#tools{position:absolute;top:68px;right:14px;z-index:6;display:flex;flex-direction:column;gap:8px;width:148px}
+#tools .mbtn{width:100%;justify-content:flex-start;border-radius:12px;padding:11px 12px;background:color-mix(in srgb,var(--panel) 92%,transparent);backdrop-filter:blur(10px)}
+#sideInfo{position:absolute;left:14px;top:68px;z-index:6;width:min(260px,70vw);
+  background:color-mix(in srgb,var(--panel) 92%,transparent);backdrop-filter:blur(10px);
+  border:1px solid var(--line);border-radius:14px;padding:10px 12px;font-size:12px;color:var(--dim);line-height:1.55}
+#sideInfo b{color:var(--fg)}
+
+/* dual joysticks — 左右分置，样式对齐运控 */
+#joyBar{position:absolute;left:0;right:0;bottom:14px;z-index:8;pointer-events:none;
+  display:flex;align-items:flex-end;justify-content:space-between;
+  padding:0 22px;gap:14px}
+#joyBar .joyWrap{pointer-events:auto}
+.joyWrap{display:flex;flex-direction:column;align-items:center;gap:8px}
+.joyLabel{font-size:12px;color:#9fb0c4;font-weight:650;letter-spacing:.4px;
+  padding:3px 10px;border-radius:999px;background:#0f1724aa;border:1px solid #2a3648}
+.joy{width:148px;height:148px;border-radius:50%;position:relative;
+  border:1.5px solid #2dd4bf66;
+  background:radial-gradient(circle at 50% 50%,#1a2838cc,#0b121acc 72%);
+  box-shadow:0 8px 28px #000a;touch-action:none}
+.joy::after{content:'';position:absolute;inset:18%;border-radius:50%;
+  border:1px dashed #2dd4bf44;pointer-events:none}
+.joyKnob{position:absolute;width:58px;height:58px;border-radius:50%;left:50%;top:50%;
+  transform:translate(-50%,-50%);
+  background:radial-gradient(circle at 35% 30%,#99f6e4,#14b8a6);
+  box-shadow:0 4px 16px #14b8a666;pointer-events:none}
+.joy.turn{border-color:#34d39966}
+.joy.turn::after{border-color:#34d39944}
+.joy.turn .joyKnob{background:radial-gradient(circle at 35% 30%,#a7f3d0,#059669);
+  box-shadow:0 4px 16px #05966966}
+@media(max-width:720px){
+  #joyBar{padding:0 10px}
+  .joy{width:120px;height:120px}.joyKnob{width:48px;height:48px}
+}
+
+/* pages */
+.page{position:fixed;inset:0;z-index:35;display:none;padding:70px 16px 16px;overflow:auto;background:var(--bg)}
+.page.show{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:14px;margin-bottom:12px}
+.card h3{margin:0 0 10px;font-size:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.fld{display:flex;align-items:center;gap:8px;margin:8px 0}
+.fld label{width:72px;color:var(--dim);font-size:13px}
+.fld input,.fld select{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.maprow{display:flex;align-items:center;gap:10px;padding:10px;border-radius:12px;border:1px solid var(--line);margin-bottom:8px;cursor:pointer;transition:background .15s,border-color .15s,box-shadow .2s}
+.maprow:hover{border-color:var(--accent);background:var(--panel2)}
+.maprow.sel{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 25%,transparent)}
+.maprow.fresh{animation:mapFresh 2.4s ease-out}
+@keyframes mapFresh{0%{box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 55%,transparent)}100%{box-shadow:none}}
+.maprow img{width:56px;height:56px;object-fit:contain;background:#101418;border-radius:8px;flex:none}
+.maprow .mi{flex:1;min-width:0}
+.maprow .mi b{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.maprow .mi small{color:var(--dim);font-size:11px}
+.maprow .acts{display:flex;gap:6px;flex:none;flex-wrap:wrap;justify-content:flex-end}
+.maprow .acts .action{padding:6px 10px;font-size:12px}
+.action{padding:10px;border-radius:10px;background:var(--panel2);border:1px solid var(--line);font-weight:600}
+.action.ok{color:var(--ok)}.action.danger{color:var(--err)}.action.primary{background:var(--accent);color:#fff;border-color:transparent}
+.navbadge{display:inline-block;margin-left:6px;font-size:10px;font-weight:700;color:var(--accent);background:var(--accent-soft);padding:2px 7px;border-radius:999px;vertical-align:middle}
+
+/* ---- map editor (v2-style) ---- */
+.float{position:absolute;z-index:20;background:color-mix(in srgb,var(--panel) 92%,transparent);
+  backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+#pgEdit{position:fixed;inset:54px 0 0 0;overflow:hidden;display:none;background:var(--bg);z-index:36;touch-action:none}
+#pgEdit.show{display:block}
+#edCv{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
+#edTools{right:14px;top:14px;display:flex;flex-direction:column;gap:6px;padding:7px;width:54px;align-items:center;
+  max-height:calc(100% - 120px);overflow-y:auto;scrollbar-width:none}
+#edTools::-webkit-scrollbar{display:none}
+#edTools .sep{width:26px;height:1px;background:var(--line);flex:none;margin:2px 0}
+#edBar{left:50%;transform:translateX(-50%);bottom:14px;display:flex;align-items:center;gap:12px;padding:9px 14px;
+  width:max-content;max-width:calc(100vw - 92px);flex-wrap:wrap;justify-content:center}
+#edBar .grp{display:flex;align-items:center;gap:7px}
+#edBar .lb{font-size:11.5px;color:var(--dim);font-weight:600;white-space:nowrap}
+#edBar .div{width:1px;align-self:stretch;background:var(--line);margin:0 2px}
+.mat{width:34px;height:34px;border-radius:10px;border:2px solid var(--line);position:relative;flex:none;cursor:pointer;
+  transition:transform .12s,border-color .15s}
+.mat.on{border-color:var(--accent);transform:scale(1.06)}
+.mat.on::after{content:'';position:absolute;inset:-6px;border-radius:13px;border:1.5px solid var(--accent);opacity:.45}
+.mat[data-m="2"]{background:#000}.mat[data-m="1"]{background:#fff}.mat[data-m="0"]{background:#808080}
+#edSize{width:104px;accent-color:var(--accent)}
+#edZoom{font-family:var(--mono);font-size:11.5px;color:var(--dim);min-width:52px;text-align:right}
+.ebtn{display:flex;align-items:center;gap:5px;padding:8px 12px;border-radius:11px;background:var(--panel2);font-size:12.5px;font-weight:600;white-space:nowrap}
+.ebtn:hover{background:var(--line)}
+.ebtn.pri{background:var(--accent);color:#fff}
+#edPos{font-family:var(--mono);font-size:11.5px;color:var(--dim2);min-width:96px}
+#edName{position:absolute;left:14px;top:14px;z-index:20;display:flex;align-items:center;gap:8px;padding:8px 13px;font-size:12.5px;font-weight:600}
+#edName .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);flex:none}
+#edName.dirty .dot{background:var(--warn)}
+#edName small{color:var(--dim);font-weight:500}
+#edHint{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:40;background:var(--panel);
+  border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow-lg);padding:18px 22px;font-size:13px;display:none;max-width:min(90vw,340px)}
+#edHint.show{display:block}
+#edHint b{display:block;font-size:14px;margin-bottom:10px}
+#edHint div{display:flex;gap:10px;padding:4px 0;color:var(--dim);align-items:baseline}
+#edHint i{font-style:normal;color:var(--fg);font-weight:600;min-width:74px;flex:none}
+#edHint .tail{display:block;color:var(--dim2);font-size:11.5px;margin-top:10px;line-height:1.5}
+#edHint button{margin-top:12px;width:100%;padding:9px;border-radius:11px;background:var(--accent);color:#fff;font-weight:600;font-size:13px}
+.tool{width:40px;height:40px;border-radius:12px;background:var(--panel2);display:flex;align-items:center;justify-content:center;position:relative;flex:none;transition:transform .12s,background .15s,color .15s}
+.tool:hover{background:var(--line)}.tool:active{transform:scale(.92)}
+.tool.on{background:var(--accent);color:#fff;box-shadow:0 2px 10px #2f7ef766}
+.tool .ic{width:19px;height:19px}
+#tip{position:fixed;z-index:70;background:#000c;color:#fff;font-size:12px;padding:6px 10px;border-radius:8px;pointer-events:none;opacity:0;transition:opacity .12s;white-space:nowrap}
+#tip.show{opacity:1}
+
+#toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(16px);opacity:0;
+  z-index:100;background:color-mix(in srgb,var(--panel) 95%,transparent);border:1px solid var(--line);
+  padding:10px 16px;border-radius:12px;box-shadow:var(--shadow-lg);max-width:90%;text-align:center;
+  transition:.22s;pointer-events:none;font-size:13px}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.err{border-color:color-mix(in srgb,var(--err) 50%,var(--line));color:var(--err)}
+#toast.ok{border-color:color-mix(in srgb,var(--ok) 50%,var(--line));color:var(--ok)}
+
+@media(max-width:960px){
+  #home{grid-template-columns:1fr;overflow:auto}
+  #hLeft,#hRight{height:auto;min-height:420px}
+  #hTiles{grid-template-rows:none}
+  .tile{min-height:88px}
+  .hbtn b{font-size:20px}.hbtn small{font-size:14px}
+  .joy{width:120px;height:120px}.joyKnob{width:50px;height:50px}
+  #tools{width:130px}
+}
+
+/* ---- motion control (remote-style) ---- */
+#pgMotion{position:fixed;inset:0;z-index:45;display:none;background:#0a0c10;color:#e8edf4;
+  overflow:hidden;-webkit-user-select:none;user-select:none}
+#pgMotion.show{display:block}
+#mcStage{position:absolute;inset:0;background:#05070b}
+#mcStream{position:absolute;inset:0;z-index:1;width:100%;height:100%;object-fit:cover;
+  display:block;background:#000;opacity:0;transition:opacity .25s}
+#mcStream.on{opacity:1}
+#mcPlaceholder{position:absolute;inset:0;z-index:2;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:14px;background:radial-gradient(ellipse at 50% 42%,#1a2230 0%,#05070b 70%);pointer-events:none;
+  transition:opacity .25s}
+#mcPlaceholder.hide{opacity:0;visibility:hidden}
+#mcPlaceholder .dogSil{width:min(52vw,420px);opacity:.55;filter:drop-shadow(0 12px 28px #000a)}
+#mcPlaceholder p{margin:0;color:#9aa8bc;font-size:15px;letter-spacing:.5px}
+#mcTop{position:absolute;top:0;left:0;right:0;z-index:6;display:flex;align-items:center;justify-content:space-between;
+  padding:12px 14px;padding-top:calc(12px + env(safe-area-inset-top));
+  background:linear-gradient(180deg,#000c,#0000);pointer-events:none}
+#mcTop>*{pointer-events:auto}
+#mcTopL,#mcTopR{display:flex;align-items:center;gap:10px}
+.mcIcon{width:42px;height:42px;border-radius:50%;background:#1c2433cc;border:1px solid #2a3648;
+  color:#d7e0ec;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px)}
+.mcIcon svg{width:20px;height:20px}
+#mcEstop{height:42px;padding:0 18px;border-radius:999px;background:#e11d28;color:#fff;font-weight:700;
+  font-size:14px;border:1px solid #ff8a8f;box-shadow:0 4px 16px #e11d2866}
+.mcStat{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:999px;
+  background:#1c2433cc;border:1px solid #2a3648;font-size:13px;color:#c9d4e3;backdrop-filter:blur(8px)}
+.mcStat b{color:#35c26b;font-variant-numeric:tabular-nums}
+#mcSpeeds{position:absolute;left:14px;top:50%;transform:translateY(-50%);z-index:6;
+  display:flex;flex-direction:column;gap:10px}
+.mcSpd{min-width:64px;padding:12px 10px;border-radius:14px;background:#1a2233cc;border:1px solid #2a3648;
+  color:#9fb0c4;font-weight:650;font-size:14px;backdrop-filter:blur(8px)}
+.mcSpd.on{background:#14b8a633;border-color:#2dd4bf;color:#5eead4;box-shadow:0 0 0 1px #2dd4bf55}
+#mcMedia{position:absolute;right:16px;top:22%;z-index:6;display:flex;flex-direction:column;gap:14px}
+.mcRound{width:54px;height:54px;border-radius:50%;background:#0f1724cc;border:2px solid #2dd4bf;
+  color:#5eead4;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);
+  box-shadow:0 4px 18px #0008}
+.mcRound svg{width:24px;height:24px}
+.mcRound.rec.on{border-color:#ef4444;color:#ef4444;background:#3f1216cc}
+#mcDock{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:6;
+  display:flex;align-items:center;gap:6px;padding:8px 10px 8px 8px;border-radius:999px;
+  background:#121926e6;border:1px solid #2a3648;backdrop-filter:blur(12px);max-width:calc(100vw - 28px)}
+.mcAct{display:flex;flex-direction:column;align-items:center;gap:5px;min-width:62px;padding:6px 6px;
+  color:#d5dee9;font-size:11px;border-radius:12px}
+.mcAct svg,.mcAct .mcPose{width:34px;height:26px;opacity:.95;object-fit:contain;display:block}
+.mcAct:active,.mcAct.on{background:#1e293bcc;color:#5eead4}
+.mcAct.on .mcPose,.mcAct:active .mcPose{filter:brightness(1.15) drop-shadow(0 0 4px #2dd4bf88)}
+#mcGridBtn{width:46px;height:46px;border-radius:50%;background:transparent;color:#042f2e;
+  display:flex;align-items:center;justify-content:center;flex:none;padding:0;overflow:hidden}
+#mcGridBtn img{width:46px;height:46px;object-fit:contain;display:block}
+#mcJoyL,#mcJoyR{position:absolute;bottom:88px;z-index:7}
+#mcJoyL{left:28px}#mcJoyR{right:28px}
+#pgMotion .joy{width:148px;height:148px;border:1.5px solid #2dd4bf66;
+  background:radial-gradient(circle at 50% 50%,#1a2838cc,#0b121acc 72%);box-shadow:0 8px 28px #000a}
+#pgMotion .joy.turn{border-color:#2dd4bf66}
+#pgMotion .joyKnob{width:58px;height:58px;
+  background:radial-gradient(circle at 35% 30%,#99f6e4,#14b8a6);box-shadow:0 4px 16px #14b8a666}
+#pgMotion .joy.turn .joyKnob{background:radial-gradient(circle at 35% 30%,#99f6e4,#0d9488)}
+#mcHint{position:absolute;left:50%;top:72px;transform:translateX(-50%);z-index:5;
+  padding:6px 14px;border-radius:999px;background:#0f1724aa;border:1px solid #2a3648;
+  font-size:12px;color:#9fb0c4;pointer-events:none;white-space:nowrap}
+@media(max-width:720px){
+  #mcJoyL{left:10px}#mcJoyR{right:10px}
+  #pgMotion .joy{width:120px;height:120px}#pgMotion .joyKnob{width:48px;height:48px}
+  #mcSpeeds{top:auto;bottom:250px;transform:none}
+  .mcAct{min-width:48px;font-size:10px}
+}
+</style>
+</head>
+<body>
+<svg style="display:none">
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
+  <!-- 导航：圆形发送箭头 -->
+  <symbol id="i-nav" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="9"/>
+    <path d="M10.2 14.8l1.2-4.6 4.6-1.2-1.2 4.6-4.6 1.2z" fill="currentColor" stroke="none"/>
+    <path d="M11.4 10.2l2.4 2.4"/>
+  </symbol>
+  <!-- 建图：折叠地图 -->
+  <symbol id="i-map" viewBox="0 0 24 24">
+    <path d="M4 7.5l5.5-2.5 5 2.5L20 5v13.5l-5.5 2.5-5-2.5L4 21V7.5z"/>
+    <path d="M9.5 5v13.5M14.5 7.5v13.5"/>
+    <rect x="11" y="10.5" width="3.2" height="4.2" rx=".6"/>
+  </symbol>
+  <!-- 地图库：地图 + 定位针 -->
+  <symbol id="i-lib" viewBox="0 0 24 24">
+    <path d="M5 8l4.5-2 5 2.2L20 6.2v11.8l-5.5 2-5-2.2L5 20V8z"/>
+    <path d="M9.5 6v11.8M14.5 8.2v11.8"/>
+    <path d="M8.2 10.2c0-1.7 1.3-3 3-3s3 1.3 3 3c0 2.2-3 5.2-3 5.2s-3-3-3-5.2z" fill="currentColor" fill-opacity=".15"/>
+    <path d="M8.2 10.2c0-1.7 1.3-3 3-3s3 1.3 3 3c0 2.2-3 5.2-3 5.2s-3-3-3-5.2z"/>
+    <circle cx="11.2" cy="10.2" r="1.1"/>
+  </symbol>
+  <!-- 设置：六齿齿轮（实心） -->
+  <symbol id="i-set" viewBox="0 0 24 24">
+    <path fill="currentColor" fill-rule="evenodd" stroke="none" d="M9.5 2.2h5l.6 2.2c.7.2 1.3.6 1.9 1l2.1-.9 2.5 4.3-1.7 1.5c.1.4.2.8.2 1.2s-.1.8-.2 1.2l1.7 1.5-2.5 4.3-2.1-.9c-.6.4-1.2.8-1.9 1l-.6 2.2h-5l-.6-2.2c-.7-.2-1.3-.6-1.9-1l-2.1.9L2.2 14.7l1.7-1.5A6.4 6.4 0 0 1 3.7 12c0-.4.1-.8.2-1.2L2.2 9.3 4.7 5l2.1.9c.6-.4 1.2-.8 1.9-1L9.5 2.2zm2.5 6.3a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/>
+  </symbol>
+  <!-- Logo：四足机器狗侧影 -->
+  <symbol id="i-dog" viewBox="0 0 24 24">
+    <path d="M3 14.2c1-2.8 3.2-4.6 6.2-5 1-1.9 2.8-3.2 5-3.2 1.2 0 2.3.4 3.1 1.2.8-.3 1.8-.2 2.5.4.9.7 1.4 1.8 1.4 3.1v.3c1.2.7 1.9 1.9 1.9 3.4 0 1.8-1.4 3.1-3.5 3.1H6.5C4.4 17.5 3 16.2 3 14.5c0-.5.1-1 .3-1.4z"/>
+    <path d="M6.2 17.2v3.2M9.5 17.2v3.2M15.2 17.2v3.2M18.2 17.2v3.2" stroke-width="2.4"/>
+    <circle cx="15.8" cy="8.4" r="1" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 运动模式：手柄 -->
+  <symbol id="i-mode" viewBox="0 0 24 24">
+    <path d="M7 9.5h10a4.5 4.5 0 0 1 4.5 4.5v.8A3.7 3.7 0 0 1 17.8 18.5h-1.6l-1.8-2.8H9.6L7.8 18.5H6.2A3.7 3.7 0 0 1 2.5 14.8v-.8A4.5 4.5 0 0 1 7 9.5z"/>
+    <path d="M8 12.8v2.4M6.8 14h2.4"/>
+    <circle cx="15.6" cy="13.2" r=".7" fill="currentColor" stroke="none"/>
+    <circle cx="17.4" cy="14.8" r=".7" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 控制状态：显示器 + 信号（SDK） -->
+  <symbol id="i-ctrl" viewBox="0 0 24 24">
+    <rect x="3" y="4.5" width="14" height="11" rx="1.8"/>
+    <path d="M8 18.5h4M10 15.5v3"/>
+    <path d="M19 6.2a3.5 3.5 0 0 1 0 5"/>
+    <path d="M20.6 4.6a5.8 5.8 0 0 1 0 8.2"/>
+  </symbol>
+  <!-- CPU：粗边芯片 -->
+  <symbol id="i-cpu" viewBox="0 0 24 24">
+    <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" stroke-width="2.2"/>
+    <rect x="9.5" y="9.5" width="5" height="5" rx=".8" fill="currentColor" stroke="none"/>
+    <path d="M9 3.2v3.3M12 3.2v3.3M15 3.2v3.3M9 17.5v3.3M12 17.5v3.3M15 17.5v3.3M3.2 9h3.3M3.2 12h3.3M3.2 15h3.3M17.5 9h3.3M17.5 12h3.3M17.5 15h3.3" stroke-width="2.2"/>
+  </symbol>
+  <!-- 内存：RAM 条 -->
+  <symbol id="i-mem" viewBox="0 0 24 24">
+    <rect x="2.5" y="6.5" width="19" height="11" rx="2"/>
+    <path d="M6.5 6.5v11M10.5 6.5v11M14.5 6.5v11M18 6.5v11"/>
+    <path d="M5.5 17.5v2.5M9.5 17.5v2.5M13.5 17.5v2.5M17.5 17.5v2.5"/>
+    <rect x="4.2" y="8.5" width="2.2" height="2.2" rx=".3" fill="currentColor" stroke="none"/>
+    <rect x="8.2" y="8.5" width="2.2" height="2.2" rx=".3" fill="currentColor" stroke="none"/>
+    <rect x="12.2" y="8.5" width="2.2" height="2.2" rx=".3" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 硬盘：HDD 盘片 -->
+  <symbol id="i-disk" viewBox="0 0 24 24">
+    <rect x="5" y="3" width="14" height="18" rx="2.2"/>
+    <path d="M8 6.5h8M8 17.5h8"/>
+    <circle cx="12" cy="12" r="4.2"/>
+    <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/>
+    <circle cx="7.2" cy="5.2" r=".55" fill="currentColor" stroke="none"/>
+    <circle cx="16.8" cy="5.2" r=".55" fill="currentColor" stroke="none"/>
+    <circle cx="7.2" cy="18.8" r=".55" fill="currentColor" stroke="none"/>
+    <circle cx="16.8" cy="18.8" r=".55" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 电池：电量格 -->
+  <symbol id="i-batt" viewBox="0 0 24 24">
+    <rect x="2" y="7" width="17.5" height="10" rx="2"/>
+    <path d="M19.5 10h2v4h-2"/>
+    <rect x="4.2" y="9.2" width="3.2" height="5.6" rx=".5" fill="currentColor" stroke="none"/>
+    <rect x="8.2" y="9.2" width="3.2" height="5.6" rx=".5" fill="currentColor" stroke="none"/>
+    <rect x="12.2" y="9.2" width="3.2" height="5.6" rx=".5" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 位置 / 航向 / 速度 -->
+  <symbol id="i-pos" viewBox="0 0 24 24">
+    <path d="M12 21s6.5-5 6.5-10.2A6.5 6.5 0 0 0 5.5 10.8C5.5 16 12 21 12 21z"/>
+    <circle cx="12" cy="10.5" r="2.3"/>
+  </symbol>
+  <symbol id="i-yaw" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="8.5"/>
+    <path d="M12 5.5v2.2M12 16.3v2.2M5.5 12h2.2M16.3 12h2.2"/>
+    <path d="M12 12l3.8-4.2" stroke-width="2.2"/>
+    <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-speed" viewBox="0 0 24 24">
+    <path d="M4.2 16.5a8.5 8.5 0 1 1 15.6 0"/>
+    <path d="M12 16.5l5.2-6.2" stroke-width="2.2"/>
+    <circle cx="12" cy="16.5" r="1.4" fill="currentColor" stroke="none"/>
+    <path d="M7.2 14.2l.8-.8M16.8 14.2l-.8-.8M12 9.2v1.1"/>
+  </symbol>
+  <symbol id="i-cam" viewBox="0 0 24 24">
+    <path d="M3.5 8.5h3.2l1.8-2h7l1.8 2H20.5v10.5H3.5V8.5z"/>
+    <circle cx="12" cy="13.2" r="3.4"/>
+    <circle cx="12" cy="13.2" r="1.3" fill="currentColor" stroke="none"/>
+  </symbol>
+  <symbol id="i-rec" viewBox="0 0 24 24">
+    <rect x="2.5" y="6.5" width="13.5" height="11" rx="2"/>
+    <path d="M16 10.2l5-2.4v8.4l-5-2.4z"/>
+    <circle cx="9" cy="12" r="2.2"/>
+  </symbol>
+  <!-- 运控底栏：复用官方姿态剪影风格 -->
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></symbol>
+  <symbol id="i-saveas" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M8 3v5h7"/><path d="M12 12v6M9 15h6"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M11 4H4v16h16v-7"/><path d="M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-fit" viewBox="0 0 24 24"><path d="M3 8V5a2 2 0 012-2h3M16 3h3a2 2 0 012 2v3M21 16v3a2 2 0 01-2 2h-3M8 21H5a2 2 0 01-2-2v-3"/></symbol>
+  <symbol id="i-hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 10-4 0v5"/><path d="M14 10V4a2 2 0 10-4 0v8"/><path d="M10 10.5V6a2 2 0 10-4 0v8l3.5 5.5a3 3 0 002.6 1.5H16a4 4 0 004-4v-3a2 2 0 10-4 0"/></symbol>
+  <symbol id="i-brush" viewBox="0 0 24 24"><path d="M9.5 14.5L4 20c1.8 1.2 4.2.8 5.5-.8.9-1.1.8-2.6 0-3.7z"/><path d="M11 13l8.2-8.2a1.7 1.7 0 012.4 2.4L13.4 15.4"/></symbol>
+  <symbol id="i-line" viewBox="0 0 24 24"><path d="M5 19L19 5"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/></symbol>
+  <symbol id="i-rect" viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1.5"/><path d="M8 10h8M8 14h8"/></symbol>
+  <symbol id="i-fill" viewBox="0 0 24 24"><path d="M4.5 12.5l7-7 7 7-7 7z"/><path d="M20.5 15.5c0 1.1-.7 2-1.6 2s-1.6-.9-1.6-2 1.6-3 1.6-3 1.6 1.9 1.6 3z"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M4 8h10a5.5 5.5 0 010 11H8"/><path d="M8 4L4 8l4 4"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="M20 8H10a5.5 5.5 0 000 11h6"/><path d="M16 4l4 4-4 4"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24">
+    <rect x="3.5" y="3.5" width="7.5" height="7.5" rx="1.2" fill="currentColor" stroke="none"/>
+    <rect x="13" y="3.5" width="7.5" height="7.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+    <rect x="3.5" y="13" width="7.5" height="7.5" rx="1.2" fill="currentColor" stroke="none"/>
+    <rect x="13" y="13" width="7.5" height="7.5" rx="1.2" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 阻尼：蹲伏收腿 -->
+  <symbol id="i-damp" viewBox="0 0 32 24">
+    <path fill="currentColor" stroke="none" d="M4.2 15.2c.6-2.2 2.2-3.6 4.6-3.8.6-1.4 1.8-2.4 3.4-2.4.8 0 1.5.3 2 .8.6-.3 1.4-.2 1.9.4.6.5.9 1.3.9 2.1v.2c.8.4 1.3 1.2 1.3 2.2 0 1.2-.9 2-2.2 2H6.4c-1.4 0-2.4-.8-2.4-1.9 0-.3.1-.6.2-.8z"/>
+    <path fill="currentColor" stroke="none" d="M7.2 16.6c-.2.9-.8 1.7-1.6 2.2l-.4 1.4h1.5l.5-1.2c.6.1 1.1 0 1.5-.3l.2 1.5h1.3l-.3-2.1c.2-.3.3-.7.2-1.1l-2.9-.4z"/>
+    <path fill="currentColor" stroke="none" d="M14.6 16.5c.1.8.6 1.5 1.3 1.9l.3 1.5h1.4l-.2-1.3c.5.1 1 .1 1.4-.2l.3 1.5h1.3l-.4-2.2c.1-.3.1-.7 0-1l-2.7-.4c-.5.1-.9.2-1.2.2h-1.5z"/>
+    <circle cx="17.6" cy="10.2" r=".7" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 站立：四足站直 -->
+  <symbol id="i-stand" viewBox="0 0 32 24">
+    <path fill="currentColor" stroke="none" d="M3.8 13.5c.9-2.6 2.9-4.2 5.6-4.5.9-1.7 2.5-2.9 4.5-2.9 1.1 0 2.1.4 2.8 1.1.7-.3 1.6-.2 2.3.4.8.6 1.2 1.6 1.2 2.7v.3c1.1.6 1.7 1.7 1.7 3 0 1.6-1.2 2.7-3.1 2.7H6.2C4.3 16.3 3 15.2 3 13.8c0-.5.1-.9.3-1.3z"/>
+    <path fill="currentColor" stroke="none" d="M7 16.2v4.2h1.5V16.2H7zm3.2 0v4.2h1.5V16.2h-1.5zm7.2 0v4.2h1.5V16.2H17.4zm3.1 0v4.2H21.9V16.2h-1.4z"/>
+    <circle cx="19.6" cy="8.4" r=".85" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 匍匐：贴地趴下 -->
+  <symbol id="i-crawl" viewBox="0 0 32 24">
+    <path fill="currentColor" stroke="none" d="M3.5 16.8c.7-1.4 2-2.2 3.8-2.3.5-1 1.5-1.7 2.8-1.7.7 0 1.3.2 1.7.6.5-.2 1.1-.2 1.6.2.5.4.7 1 .7 1.6v.15c.7.3 1.1.9 1.1 1.6 0 .9-.7 1.5-1.8 1.5H5.2c-1.1 0-1.9-.6-1.9-1.4 0-.3.1-.5.2-.7z"/>
+    <path fill="currentColor" stroke="none" d="M5.6 17.8l-1.4 2.4h1.6l.9-1.5.9 1.5h1.5l-1.2-2.2H5.6zm8.2 0l-.8 2.4h1.5l.5-1.4.7 1.4h1.5l-1.1-2.4h-2.3z"/>
+    <path fill="currentColor" stroke="none" d="M16.8 14.2c.3-.15.7-.1 1 .15l1.8 1.5c.2.15.3.4.25.65l-.35 1.3h-1.4l.2-.75-1.3-1.05v-.3c0-.2.05-.4.15-.55l-.35-.95z"/>
+    <circle cx="15.2" cy="13.2" r=".55" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 锁定：站立稳定姿态 -->
+  <symbol id="i-lock" viewBox="0 0 32 24">
+    <path fill="currentColor" stroke="none" d="M4 13.8c.85-2.4 2.7-3.9 5.2-4.2.85-1.6 2.35-2.7 4.2-2.7 1 0 1.95.35 2.6 1 .65-.25 1.5-.2 2.1.35.75.55 1.15 1.45 1.15 2.5v.25c1 .55 1.55 1.55 1.55 2.75 0 1.5-1.15 2.55-2.9 2.55H6.35C4.55 16.3 3.3 15.25 3.3 13.95c0-.45.1-.85.25-1.15z"/>
+    <path fill="currentColor" stroke="none" d="M7.2 16.1v3.8h1.35v-3.8H7.2zm3 0v3.8h1.35v-3.8H10.2zm6.9 0v3.8h1.35v-3.8H17.1zm2.95 0v3.8h1.35v-3.8h-1.35z"/>
+    <path fill="none" stroke="currentColor" stroke-width="1.4" d="M19.2 7.6v2.2"/>
+    <circle cx="19.2" cy="6.6" r=".9" fill="currentColor" stroke="none"/>
+  </symbol>
+  <!-- 原地模式：站立 + 旋转点 -->
+  <symbol id="i-inplace" viewBox="0 0 32 24">
+    <path fill="currentColor" stroke="none" d="M3.8 13.5c.9-2.6 2.9-4.2 5.6-4.5.9-1.7 2.5-2.9 4.5-2.9 1.1 0 2.1.4 2.8 1.1.7-.3 1.6-.2 2.3.4.8.6 1.2 1.6 1.2 2.7v.3c1.1.6 1.7 1.7 1.7 3 0 1.6-1.2 2.7-3.1 2.7H6.2C4.3 16.3 3 15.2 3 13.8c0-.5.1-.9.3-1.3z"/>
+    <path fill="currentColor" stroke="none" d="M7 16.2v4.2h1.5V16.2H7zm3.2 0v4.2h1.5V16.2h-1.5zm7.2 0v4.2h1.5V16.2H17.4zm3.1 0v4.2H21.9V16.2h-1.4z"/>
+    <circle cx="19.6" cy="8.4" r=".85" fill="currentColor" stroke="none"/>
+    <circle cx="24.2" cy="8.2" r=".85" fill="currentColor" stroke="none"/>
+    <circle cx="24.2" cy="11.4" r=".85" fill="currentColor" stroke="none"/>
+    <circle cx="24.2" cy="14.6" r=".85" fill="currentColor" stroke="none"/>
+  </symbol>
+</svg>
+
+<!-- HOME -->
+<section id="home" class="show">
+  <div id="hLeft">
+    <div id="hHead">
+      <div class="logo"><svg class="ic" style="width:26px;height:26px"><use href="#i-dog"/></svg></div>
+      <div>
+        <h2>钢镚控制台</h2>
+        <div class="sub"><span class="dot" id="hDot"></span><span id="hSub">连接中…</span></div>
+      </div>
+    </div>
+    <div id="hClock">
+      <div class="clkMain"><div id="hTime">--:--:--</div><div id="hDate">-</div></div>
+      <div id="hUptime"><div class="uk">系统已运行</div><div class="uv" id="tUptime">-</div></div>
+    </div>
+    <div id="hTiles">
+      <div class="tile" id="tileMode">
+        <div class="tic" style="background:#2f7ef718;color:#2f7ef7"><svg class="ic"><use href="#i-mode"/></svg></div>
+        <div class="meta"><div class="k">运动模式</div><div class="v" id="tMode">-</div></div>
+        <button class="tileAct" id="btnGoMotion" type="button">运控</button>
+      </div>
+      <div class="tile" id="tileCtrl">
+        <div class="tic" style="background:#7c3aed18;color:#7c3aed"><svg class="ic"><use href="#i-ctrl"/></svg></div>
+        <div class="meta"><div class="k">控制状态</div><div class="v" id="tCtrl">-</div></div>
+        <button class="tileAct app" id="btnCtrlToggle" type="button">切 APP</button>
+      </div>
+      <div class="tile" id="tileCpu">
+        <div class="tic" style="background:#0891b218;color:#0891b2"><svg class="ic"><use href="#i-cpu"/></svg></div>
+        <div class="meta"><div class="k">CPU 占用</div><div class="v" id="tCpu">-</div><div class="bar"><i id="barCpu"></i></div></div>
+      </div>
+      <div class="tile" id="tileMem">
+        <div class="tic" style="background:#d9770618;color:#d97706"><svg class="ic"><use href="#i-mem"/></svg></div>
+        <div class="meta"><div class="k">内存占用</div><div class="v" id="tMem">-</div><div class="bar"><i id="barMem"></i></div></div>
+      </div>
+      <div class="tile" id="tileDisk">
+        <div class="tic" style="background:#64748b22;color:#64748b"><svg class="ic"><use href="#i-disk"/></svg></div>
+        <div class="meta"><div class="k">硬盘占用</div><div class="v" id="tDisk">-</div><div class="bar"><i id="barDisk"></i></div></div>
+      </div>
+      <div class="tile" id="tileBatt">
+        <div class="tic" style="background:#16a34a18;color:#16a34a"><svg class="ic"><use href="#i-batt"/></svg></div>
+        <div class="meta"><div class="k">电池电量</div><div class="v" id="tBatt">-</div><div class="bar"><i id="barBatt"></i></div></div>
+      </div>
+    </div>
+    <div id="hChips"></div>
+    <div id="hFlow">主线：<b>建图 → 停止 → 保存地图 → 导航</b><br>
+      遥控：左摇杆平移，右摇杆转向。位置/航向/速度在建图或导航页查看。</div>
+    <div id="apiWarn" style="display:none;margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid color-mix(in srgb,var(--err) 45%,var(--line));background:var(--err-soft);color:var(--err);font-size:12.5px;line-height:1.45">
+      <b>后端 API (:8090) 连不上</b> — 首页 CPU/内存/地图数量都会空着。地图文件还在，只是网页读不到。<br>
+      在板子终端执行：<code style="user-select:all">bash /home/linaro/robot_ws/scripts/fix_webops.sh</code>
+      然后刷新本页。
+    </div>
+  </div>
+  <div id="hRight">
+    <button class="hbtn" data-go="nav">
+      <span class="ico nav"><svg class="ic"><use href="#i-nav"/></svg></span>
+      <span class="txt"><b>导航</b><small>自动重定位 · 设姿/目标 · 热换图</small></span>
+      <span class="live" id="sbNav">未启动</span>
+    </button>
+    <button class="hbtn" data-go="map">
+      <span class="ico map"><svg class="ic"><use href="#i-map"/></svg></span>
+      <span class="txt"><b>建图</b><small>FAST-LIO · 实时栅格 · 保存 PGM</small></span>
+      <span class="live" id="sbMap">未建图</span>
+    </button>
+    <button class="hbtn" data-go="maps">
+      <span class="ico lib"><svg class="ic"><use href="#i-lib"/></svg></span>
+      <span class="txt"><b>地图库</b><small>查看 / 编辑 / 删除已保存地图</small></span>
+      <span class="live" id="sbMaps">0 张</span>
+    </button>
+    <button class="hbtn" data-go="settings">
+      <span class="ico set"><svg class="ic"><use href="#i-set"/></svg></span>
+      <span class="txt"><b>设置</b><small>连接 · 狗动作 · 系统日志</small></span>
+      <span class="live">WLAN</span>
+    </button>
+  </div>
+</section>
+
+<!-- TOP + STAGE -->
+<header id="top">
+  <button id="back" title="返回"><svg class="ic"><use href="#i-back"/></svg></button>
+  <div id="title">导航</div>
+  <div id="menu"></div>
+  <div id="status">
+    <button id="estopTop" title="急停">急停</button>
+    <span class="dot" id="topDot"></span>
+    <span class="chip" id="topChip"><b id="topChipTxt">-</b></span>
+  </div>
+</header>
+<section id="stage">
+  <canvas id="cv"></canvas>
+  <div id="map3dWrap">
+    <canvas id="map3d"></canvas>
+    <div id="map3dWait">等待实时点云 /cloud_registered…</div>
+  </div>
+  <div id="mapVideo">
+    <img id="mapStream" alt="map video">
+    <div class="mvCap">狗身相机</div>
+  </div>
+  <div id="hintStrip">-</div>
+  <div id="sideInfo"></div>
+  <div id="tools"></div>
+  <div id="joyBar">
+    <div class="joyWrap" id="joyLeft">
+      <div class="joyLabel">移动</div>
+      <div class="joy" id="joyMove"><div class="joyKnob" id="knobMove"></div></div>
+    </div>
+    <div class="joyWrap" id="joyRight">
+      <div class="joyLabel">转向</div>
+      <div class="joy turn" id="joyTurn"><div class="joyKnob" id="knobTurn"></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- MOTION CONTROL -->
+<section id="pgMotion">
+  <div id="mcStage">
+    <img id="mcStream" alt="video">
+    <div id="mcPlaceholder">
+      <svg class="dogSil" viewBox="0 0 420 260" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M70 170c20-40 55-70 110-78 18-28 48-48 85-48 22 0 40 8 52 22 14-6 30-6 44 2 18 10 28 28 28 50v8c22 10 36 30 36 54 0 28-22 48-54 48H118c-36 0-62-22-62-52 0-8 2-16 6-24z" fill="#2a3548" stroke="#4b5a72" stroke-width="3"/>
+        <circle cx="286" cy="98" r="10" fill="#5eead4"/>
+        <circle cx="318" cy="98" r="10" fill="#5eead4"/>
+        <path d="M118 226v28M168 226v28M268 226v28M318 226v28" stroke="#4b5a72" stroke-width="10" stroke-linecap="round"/>
+      </svg>
+      <p id="mcLoadTxt">正在连接狗身相机…</p>
+    </div>
+  </div>
+  <div id="mcTop">
+    <div id="mcTopL">
+      <button class="mcIcon" id="mcBack" title="返回"><svg class="ic"><use href="#i-back"/></svg></button>
+      <button class="mcIcon" id="mcToSet" title="设置"><svg class="ic"><use href="#i-set"/></svg></button>
+      <button id="mcEstop">紧急停止</button>
+    </div>
+    <div id="mcTopR">
+      <span class="mcStat">控制 <b id="mcCtrl">-</b></span>
+      <span class="mcStat">电量 <b id="mcBatt">-</b></span>
+    </div>
+  </div>
+  <div id="mcHint">左摇杆平移 · 右摇杆转向 · 需 SDK 控制权</div>
+  <div id="mcSpeeds">
+    <button class="mcSpd" data-spd="low">低速</button>
+    <button class="mcSpd on" data-spd="mid">中速</button>
+    <button class="mcSpd" data-spd="high">高速</button>
+  </div>
+  <div id="mcMedia">
+    <button class="mcRound" id="mcRec" title="录像"><svg class="ic"><use href="#i-rec"/></svg></button>
+    <button class="mcRound" id="mcShot" title="拍照"><svg class="ic"><use href="#i-cam"/></svg></button>
+  </div>
+  <div id="mcJoyL"><div class="joy" id="mcJoyMove"><div class="joyKnob" id="mcKnobMove"></div></div></div>
+  <div id="mcJoyR"><div class="joy turn" id="mcJoyTurn"><div class="joyKnob" id="mcKnobTurn"></div></div></div>
+  <div id="mcDock">
+    <button id="mcGridBtn" title="菜单"><img src="icons/mc_grid.png" alt="menu"></button>
+    <button class="mcAct" data-act="passive"><img class="mcPose" src="icons/mc_damp.png" alt="">阻尼</button>
+    <button class="mcAct" data-act="stand_up"><img class="mcPose" src="icons/mc_stand.png" alt="">站立</button>
+    <button class="mcAct" data-act="lie_down"><img class="mcPose" src="icons/mc_crawl.png" alt="">匍匐</button>
+    <button class="mcAct" id="mcLock"><img class="mcPose" src="icons/mc_lock.png" alt="">锁定</button>
+    <button class="mcAct" id="mcInplace"><img class="mcPose" src="icons/mc_inplace.png" alt="">原地模式</button>
+  </div>
+</section>
+
+<!-- MAPS -->
+<section class="page" id="pgMaps">
+  <div class="card">
+    <h3>地图库 <span class="chip" id="mapsCount">0</span></h3>
+    <p style="margin:0 0 10px;font-size:12px;color:var(--dim)">点「设为导航地图」选中下次启动导航要用的图；铅笔进入编辑。</p>
+    <div id="mapsList"></div>
+    <p id="mapsEmpty" style="display:none;color:var(--dim);font-size:12px;text-align:center;padding:24px 0">还没有地图 —— 先去「建图」走一圈，停止后点「保存地图」</p>
+  </div>
+</section>
+
+<!-- MAP EDIT -->
+<div id="pgEdit">
+  <canvas id="edCv"></canvas>
+  <div class="float" id="edName"><span class="dot"></span><span id="edNameT"></span>
+    <small id="edNameS"></small></div>
+  <div class="float" id="edTools"></div>
+  <div class="float" id="edBar">
+    <div class="grp"><span class="lb">画</span>
+      <span class="mat" data-m="2" title="障碍(黑)"></span>
+      <span class="mat" data-m="1" title="可通行(白)"></span>
+      <span class="mat" data-m="0" title="未知(灰)"></span></div>
+    <div class="div"></div>
+    <div class="grp"><span class="lb">笔刷</span>
+      <input type="range" id="edSize" min="1" max="41" step="2" value="5">
+      <span class="lb" id="edSizeV" style="min-width:56px"></span></div>
+    <div class="div"></div>
+    <div class="grp"><span id="edZoom"></span><span id="edPos"></span></div>
+    <div class="div"></div>
+    <div class="grp"><button class="ebtn pri" id="edDoSave">
+        <svg class="ic"><use href="#i-save"/></svg>保存</button>
+      <button class="ebtn" id="edDoSaveAs">
+        <svg class="ic"><use href="#i-saveas"/></svg>另存为</button>
+      <button class="ebtn" id="edDoReload">
+        <svg class="ic"><use href="#i-refresh"/></svg>放弃</button></div>
+  </div>
+  <div id="edHint">
+    <b>地图编辑手势</b>
+    <div><i>单指拖</i>画(按当前工具和材质)</div>
+    <div><i>双指拖</i>平移画面</div>
+    <div><i>双指捏合</i>缩放</div>
+    <div><i>双击</i>适应窗口</div>
+    <span class="tail">放大到能看清格子再画。右侧手势按钮可把单指改成平移。</span>
+    <button id="edHintOk">知道了</button>
+  </div>
+</div>
+<div id="tip"></div>
+
+<!-- SETTINGS -->
+<section class="page" id="pgSet">
+  <div class="card">
+    <h3>连接（请用主控 WLAN IP）</h3>
+    <div class="fld"><label>主机 IP</label><input id="hostIp"></div>
+    <div class="fld"><label>API 端口</label><input id="apiPort" value="8090"></div>
+    <div class="fld"><label>rosbridge</label><input id="rosUrl"></div>
+    <div class="fld"><label>视频流</label><input id="videoUrl" placeholder="默认：主控 MJPEG 代理（狗 RTSP）"></div>
+    <button class="mbtn primary" id="btnSaveHost" style="margin-top:8px">保存并重连</button>
+    <p style="margin:10px 0 0;font-size:12px;color:var(--dim)">不要用 eth0 / 交换机 IP 开网页。狗 SDK：192.168.168.168。图传默认走有线 RTSP <code>rtsp://192.168.168.168:8554/test</code>，由主控转成浏览器可播的 MJPEG；留空即用默认代理。</p>
+  </div>
+  <div class="card">
+    <h3>机器狗动作</h3>
+    <div class="grid3">
+      <button class="action ok" data-act="stand_up">站立</button>
+      <button class="action" data-act="lie_down">趴下</button>
+      <button class="action" data-act="passive">被动</button>
+      <button class="action" data-act="jump">跳跃</button>
+      <button class="action" data-act="front_jump">前跳</button>
+      <button class="action" data-act="shake_hand">握手</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>系统</h3>
+    <div class="fld"><label>负载</label><span id="sysLoad">-</span></div>
+    <div class="fld"><label>内存</label><span id="sysMem">-</span></div>
+    <div class="fld"><label>网络</label><span id="sysNet">-</span></div>
+    <button class="mbtn" id="btnRebootRos" style="margin-top:8px">重启 rosbridge</button>
+  </div>
+</section>
+
+<div id="toast"></div>
+
+<script src="three.min.js"></script>
+<script src="roslib.min.js"></script>
+<script>
+(function(){
+'use strict';
+var DEFAULT_HOST=(location.hostname&&location.hostname!=='localhost')?location.hostname:'192.168.122.152';
+var host=localStorage.getItem('dog_host')||DEFAULT_HOST;
+var apiPort=localStorage.getItem('dog_api_port')||'8090';
+var API='http://'+host+':'+apiPort;
+var rosUrl=localStorage.getItem('dog_ros_url')||('ws://'+host+':9090');
+
+function $(id){return document.getElementById(id)}
+function deg(r){return (r*180/Math.PI).toFixed(1)}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function httpGet(u,cb,er){fetch(u).then(r=>r.json()).then(cb).catch(e=>er&&er(e))}
+function httpPost(u,b,cb,er){fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()).then(cb).catch(e=>er&&er(e))}
+function yawOf(q){return Math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))}
+/** 用四元数旋转向量 (ROS xyzw) */
+function quatRotateVec(q,v){
+  var x=q.x,y=q.y,z=q.z,w=q.w, vx=v[0],vy=v[1],vz=v[2];
+  var tx=2*(y*vz-z*vy), ty=2*(z*vx-x*vz), tz=2*(x*vy-y*vx);
+  return [vx+w*tx+(y*tz-z*ty), vy+w*ty+(z*tx-x*tz), vz+w*tz+(x*ty-y*tx)];
+}
+/**
+ * 将校平后的机体系 +X（狗头朝向）投到 Three 场景水平面，得到 dog.rotation.y。
+ * 点云用 (X,Z,-Y)；机头局部 +X 经 Ry(θ) → (cosθ,0,-sinθ)，故 θ=atan2(fLev.y, fLev.x)。
+ * 旧逻辑用 -yaw 会把朝向左右/前后弄反。
+ */
+function headingYawFromQuat(q, levelM){
+  var f=quatRotateVec(q,[1,0,0]);
+  var fl=mulMat3(levelM||levelMat(), f[0],f[1],f[2]);
+  var hx=fl[0], hz=-fl[1]; // Three 平面分量（Y 向上忽略）
+  if(hx*hx+hz*hz<1e-8){
+    // 几乎竖直时退回平面 yaw
+    return yawOf(q);
+  }
+  // local +X → (hx,0,hz)=len*(cosθ,0,-sinθ) ⇒ cosθ∝hx, sinθ∝-hz=fl[1]
+  return Math.atan2(fl[1], fl[0]);
+}
+
+var toastT=null;
+function toast(msg,kind){
+  var el=$('toast');el.textContent=msg;el.className='show'+(kind==='err'?' err':kind==='ok'?' ok':'');
+  clearTimeout(toastT);toastT=setTimeout(()=>el.className='',2800);
+}
+
+/* ---- state ---- */
+var UI={route:'home',selMap:localStorage.getItem('dog_selMap')||'',activeMap:''}; // home|nav|map|maps|edit|settings|motion
+var freshMap='';
+var DPR=Math.min(2,window.devicePixelRatio||1);
+var locReady=false, relocBusy=false;
+var S={fastlio:false,nav2:false,livox:false,bridge:false,scan:false,map_building:false,rosbridge:false,auto_relocalize:false};
+var ros=null,connected=false,subsStarted=false;
+var buildMeta=null,buildData=null,navMeta=null,navData=null;
+var robot={x:0,y:0,yaw:0,z:0,spd:0,qx:0,qy:0,qz:0,qw:1}, goal={x:null,y:null,yaw:0}, initP={x:null,y:null,yaw:0};
+var poseSmooth={x:0,y:0,yaw:0,z:0,qx:0,qy:0,qz:0,qw:1,init:false}; // 显示用平滑位姿，抑制上下/抖动
+/** LIO 位姿质量：跳变时同时冻结狗位姿与点云累积，避免「狗飘走、地图留原地」 */
+var lioQual={ok:true, jumpXy:0, jumpYawDeg:0, skipAccum:0, hold:0,
+  last:{x:0,y:0,yaw:0,t:0,init:false},
+  good:{x:0,y:0,yaw:0,z:0,qx:0,qy:0,qz:0,qw:1,init:false}};
+/** 导航页位姿：直接写 robot，不做 LIO 跳变过滤（否则 (0,0)→AMCL 真值会被当成炸了丢掉） */
+function feedNavPose(x,y,yaw,z,quat){
+  if(!isFinite(x)||!isFinite(y)||!isFinite(yaw))return;
+  var zz=(z!=null&&isFinite(z))?z:(robot.z||0);
+  robot.x=x; robot.y=y; robot.yaw=yaw; robot.z=zz;
+  if(quat){robot.qx=quat.x;robot.qy=quat.y;robot.qz=quat.z;robot.qw=quat.w}
+}
+function feedRobotPose(x,y,yaw,z,quat){
+  var now=performance.now();
+  var zz=(z!=null && isFinite(z))?z:(robot.z||0);
+  var qx=quat?quat.x:(robot.qx||0), qy=quat?quat.y:(robot.qy||0);
+  var qz=quat?quat.z:(robot.qz||0), qw=quat?quat.w:(robot.qw!=null?robot.qw:1);
+  if(lioQual.last.init){
+    var dt=Math.max(0.02,(now-lioQual.last.t)/1000);
+    var dxy=Math.hypot(x-lioQual.last.x, y-lioQual.last.y);
+    var dyaw=yaw-lioQual.last.yaw;
+    while(dyaw>Math.PI)dyaw-=2*Math.PI;
+    while(dyaw<-Math.PI)dyaw+=2*Math.PI;
+    lioQual.jumpXy=dxy; lioQual.jumpYawDeg=Math.abs(dyaw)*180/Math.PI;
+    // 单帧位移/转角过大 → LIO 炸了；此帧丢弃，冻结显示，避免狗离开已累积点云
+    var bad=(dxy>0.25 && dxy/dt>0.9) || (Math.abs(dyaw)>0.30 && Math.abs(dyaw)/dt>2.0)
+      || dxy>1.5 || Math.abs(dyaw)>1.2;
+    lioQual.ok=!bad;
+    if(bad){
+      lioQual.hold++;
+      // last 跟原始帧，才能在「跳变后重新稳住」时恢复跟踪
+      lioQual.last={x:x,y:y,yaw:yaw,t:now,init:true};
+      if(lioQual.good.init){
+        robot.x=lioQual.good.x; robot.y=lioQual.good.y; robot.yaw=lioQual.good.yaw; robot.z=lioQual.good.z;
+        robot.qx=lioQual.good.qx; robot.qy=lioQual.good.qy; robot.qz=lioQual.good.qz; robot.qw=lioQual.good.qw;
+      }
+      return;
+    }
+  }
+  lioQual.last={x:x,y:y,yaw:yaw,t:now,init:true};
+  lioQual.good={x:x,y:y,yaw:yaw,z:zz,qx:qx,qy:qy,qz:qz,qw:qw,init:true};
+  robot.x=x; robot.y=y; robot.yaw=yaw; robot.z=zz;
+  robot.qx=qx; robot.qy=qy; robot.qz=qz; robot.qw=qw;
+  if(!poseSmooth.init){
+    poseSmooth={x:x,y:y,yaw:yaw,z:zz, qx:qx,qy:qy,qz:qz,qw:qw, init:true};
+    return;
+  }
+  var a=0.35; // 略跟紧，减少显示滞后造成的「狗不在点云里」
+  poseSmooth.x=poseSmooth.x*(1-a)+x*a;
+  poseSmooth.y=poseSmooth.y*(1-a)+y*a;
+  poseSmooth.z=poseSmooth.z*(1-a)+zz*a;
+  var dy=yaw-poseSmooth.yaw;
+  while(dy>Math.PI)dy-=2*Math.PI;
+  while(dy<-Math.PI)dy+=2*Math.PI;
+  poseSmooth.yaw+=dy*a;
+  var dot=poseSmooth.qx*qx+poseSmooth.qy*qy+poseSmooth.qz*qz+poseSmooth.qw*qw;
+  var sx=1;
+  if(dot<0){sx=-1;dot=-dot}
+  poseSmooth.qx=poseSmooth.qx*(1-a)+sx*qx*a;
+  poseSmooth.qy=poseSmooth.qy*(1-a)+sx*qy*a;
+  poseSmooth.qz=poseSmooth.qz*(1-a)+sx*qz*a;
+  poseSmooth.qw=poseSmooth.qw*(1-a)+sx*qw*a;
+  var n=Math.hypot(poseSmooth.qx,poseSmooth.qy,poseSmooth.qz,poseSmooth.qw)||1;
+  poseSmooth.qx/=n; poseSmooth.qy/=n; poseSmooth.qz/=n; poseSmooth.qw/=n;
+}
+var path=null, navStatus='idle', mappingPhase='idle', armed='';
+var mappingSession=false; // 仅「开始建图」置位；导航用的 LIO 不算建图
+var scanPts=null; // LaserScan → base_footprint 直角坐标 [x0,y0,…]
+var scanPtsTs=0;
+var mapPcdReady=false, mapStatusTimer=null, mapVideoTimer=null;
+var drag=null;
+var vel={vx:0,vy:0,wz:0}, velPub=null;
+var VX=0.30, VY=0.20, WZ=0.55;
+var spdMode='mid', inplaceMode=false, lockMode=false, recording=false;
+var videoUrl=localStorage.getItem('dog_video_url')||'';
+var SPD={low:{vx:0.15,vy:0.10,wz:0.30},mid:{vx:0.30,vy:0.20,wz:0.55},high:{vx:0.55,vy:0.35,wz:0.95}};
+
+$('hostIp').value=host;$('apiPort').value=apiPort;$('rosUrl').value=rosUrl;
+if($('videoUrl'))$('videoUrl').value=videoUrl||(API+'/api/video/mjpeg');
+
+/* ---- routing (v2 style) ---- */
+function go(r){
+  if(UI.route==='edit'&&r!=='edit'&&ED.dirty&&!confirm('地图编辑尚未保存，确定离开？'))return;
+  if(UI.route==='edit'&&r!=='edit')ED.open=false;
+  UI.route=r;
+  $('home').classList.toggle('show',r==='home');
+  $('top').classList.toggle('show',r!=='home'&&r!=='motion');
+  $('stage').classList.toggle('show',r==='nav'||r==='map');
+  $('pgMaps').classList.toggle('show',r==='maps');
+  $('pgSet').classList.toggle('show',r==='settings');
+  $('pgMotion').classList.toggle('show',r==='motion');
+  if($('pgEdit'))$('pgEdit').classList.toggle('show',r==='edit');
+  $('title').textContent={nav:'导航',map:'建图',maps:'地图库',edit:'编辑地图',settings:'设置',motion:'运控'}[r]||'';
+  if(r!=='motion'){estopSilent(); stopMotionVideo()}
+  else {syncMcHud(); loadMotionVideo(true)}
+  // 建图页：3D + 图传；导航页：2D 栅格
+  var isMap=r==='map';
+  $('stage')&&$('stage').classList.toggle('mapRoute',isMap);
+  $('map3dWrap')&&$('map3dWrap').classList.toggle('show',isMap);
+  $('mapVideo')&&$('mapVideo').classList.toggle('show',isMap);
+  $('cv')&&$('cv').classList.toggle('mapHidden',isMap);
+  $('sideInfo')&&$('sideInfo').classList.toggle('mapMode',isMap);
+  if(isMap){ startMapPage(); }
+  else { stopMapPage(); }
+  renderMenu(); renderSide(); updateHint();
+  if(r==='nav'){resizeCv();draw()}
+  if(r==='map'){resizeMap3d(); highlightNext()}
+  if(r==='maps')refreshMaps();
+  if(r==='nav')refreshMapSelect();
+  if(r==='edit'){edResize();edDraw()}
+}
+document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>go(b.dataset.go));
+$('back').onclick=()=>go(UI.route==='edit'?'maps':'home');
+$('btnGoMotion').onclick=()=>go('motion');
+$('mcBack').onclick=()=>go('home');
+$('mcToSet').onclick=()=>go('settings');
+$('mcGridBtn').onclick=()=>go('home');
+
+function setCtrlLabel(mode){
+  var m=mode||(S.bridge?'SDK':'APP');
+  $('tCtrl').textContent=m;
+  if($('mcCtrl'))$('mcCtrl').textContent=m;
+  var btn=$('btnCtrlToggle');
+  if(!btn)return;
+  if(m==='SDK'){btn.textContent='切 APP';btn.className='tileAct app'}
+  else {btn.textContent='切 SDK';btn.className='tileAct sdk'}
+}
+function switchCtrl(toMode){
+  var target=toMode||(($('tCtrl').textContent==='SDK')?'APP':'SDK');
+  if(target==='APP'){
+    vel={vx:0,vy:0,wz:0}; for(var i=0;i<4;i++)sendVel();
+  }
+  toast('正在切换到 '+target+'…');
+  httpPost(API+'/api/ctrl',{mode:target},r=>{
+    if(r.ctrl){S.bridge=(r.ctrl==='SDK');setCtrlLabel(r.ctrl)}
+    toast(r.msg||(r.ok?'完成':'失败'),r.ok?'ok':'err');
+    refreshSys();
+  },()=>toast('切换失败','err'));
+}
+$('btnCtrlToggle').onclick=()=>switchCtrl();
+
+function applySpeed(mode){
+  spdMode=mode||'mid';
+  var s=SPD[spdMode]||SPD.mid;
+  VX=s.vx;VY=s.vy;WZ=s.wz;
+  document.querySelectorAll('.mcSpd').forEach(b=>b.classList.toggle('on',b.dataset.spd===spdMode));
+}
+document.querySelectorAll('.mcSpd').forEach(b=>b.onclick=()=>applySpeed(b.dataset.spd));
+
+function callBridge(act){
+  if(!connected){toast('未连接','err');return}
+  if(!S.bridge){toast('当前为 APP 控制，请先切到 SDK','err');return}
+  new ROSLIB.Service({ros:ros,name:'/bridge/'+act,serviceType:'std_srvs/srv/Trigger'})
+    .callService({},r=>toast(act+(r.success?' 成功':' 失败'),r.success?'ok':'err'));
+}
+$('mcLock').onclick=()=>{
+  lockMode=!lockMode;
+  $('mcLock').classList.toggle('on',lockMode);
+  if(lockMode){vel={vx:0,vy:0,wz:0};sendVel();toast('已锁定摇杆','ok')}
+  else toast('已解锁');
+};
+$('mcInplace').onclick=()=>{
+  inplaceMode=!inplaceMode;
+  $('mcInplace').classList.toggle('on',inplaceMode);
+  toast(inplaceMode?'原地模式：仅转向':'已关闭原地模式',inplaceMode?'ok':'');
+};
+function syncMcHud(){
+  setCtrlLabel(S.bridge?'SDK':'APP');
+  if($('tBatt')&&$('mcBatt'))$('mcBatt').textContent=$('tBatt').textContent;
+}
+var snapTimer=null, snapBusy=false, snapFail=0, mjpegWatch=null;
+function defaultVideoUrl(){
+  return API+'/api/video/mjpeg';
+}
+function defaultSnapUrl(){
+  return API+'/api/video/snapshot';
+}
+function stopMotionVideo(){
+  if(snapTimer){clearInterval(snapTimer);snapTimer=null}
+  if(mjpegWatch){clearTimeout(mjpegWatch);mjpegWatch=null}
+  snapBusy=false; snapFail=0;
+  var img=$('mcStream'), ph=$('mcPlaceholder');
+  if(img){
+    img.onload=null; img.onerror=null;
+    img.classList.remove('on');
+    if(img.dataset.blob){try{URL.revokeObjectURL(img.dataset.blob)}catch(e){} delete img.dataset.blob}
+    img.removeAttribute('src');
+  }
+  if(ph)ph.classList.remove('hide');
+}
+function startSnapPolling(){
+  if(snapTimer)return;
+  var img=$('mcStream'), tip=$('mcLoadTxt'), ph=$('mcPlaceholder');
+  function tick(){
+    if(snapBusy || UI.route!=='motion')return;
+    snapBusy=true;
+    fetch(defaultSnapUrl()+'?t='+Date.now(),{cache:'no-store'}).then(function(r){
+      if(!r.ok)throw new Error('http '+r.status);
+      return r.blob();
+    }).then(function(blob){
+      var prev=img.dataset.blob;
+      var url=URL.createObjectURL(blob);
+      img.onload=function(){
+        if(prev)try{URL.revokeObjectURL(prev)}catch(e){}
+        img.dataset.blob=url;
+        img.classList.add('on');
+        ph.classList.add('hide');
+        tip.textContent='';
+        snapFail=0; snapBusy=false;
+      };
+      img.onerror=function(){
+        try{URL.revokeObjectURL(url)}catch(e){}
+        snapFail++; snapBusy=false;
+        if(snapFail>12){
+          tip.textContent='视频流连接失败（检查狗相机 RTSP / 网线）';
+          ph.classList.remove('hide'); img.classList.remove('on');
+        }
+      };
+      img.src=url;
+    }).catch(function(){
+      snapFail++; snapBusy=false;
+      if(snapFail>12){
+        tip.textContent='视频流连接失败（检查狗相机 RTSP / 网线）';
+        ph.classList.remove('hide'); img.classList.remove('on');
+      }
+    });
+  }
+  tick();
+  snapTimer=setInterval(tick, 55); // ~18fps
+}
+function loadMotionVideo(on){
+  var img=$('mcStream'), tip=$('mcLoadTxt'), ph=$('mcPlaceholder');
+  stopMotionVideo();
+  if(!on)return;
+  tip.textContent='正在连接狗身相机…';
+  ph.classList.remove('hide');
+  if($('videoUrl') && !$('videoUrl').value.trim()) $('videoUrl').value=defaultVideoUrl();
+
+  // 优先连续 MJPEG（更流畅）；2.2s 内无首帧则改 JPEG 轮询
+  var gotFrame=false;
+  img.onload=function(){
+    gotFrame=true;
+    img.classList.add('on');
+    ph.classList.add('hide');
+    tip.textContent='';
+  };
+  img.onerror=function(){
+    if(!gotFrame) startSnapPolling();
+  };
+  img.src=defaultVideoUrl()+'?t='+Date.now();
+  mjpegWatch=setTimeout(function(){
+    if(!gotFrame && UI.route==='motion'){
+      img.onload=null; img.onerror=null;
+      img.removeAttribute('src');
+      tip.textContent='切换兼容模式…';
+      startSnapPolling();
+    }
+  }, 2200);
+}
+function captureShot(){
+  // 优先走后端抓帧，避免跨域 canvas 污染
+  var a=document.createElement('a');
+  a.href=API+'/api/video/snapshot?_='+Date.now();
+  a.download='dog_'+Date.now()+'.jpg';
+  a.click();
+  toast('正在抓拍…','ok');
+}
+$('mcShot').onclick=captureShot;
+$('mcRec').onclick=()=>{
+  recording=!recording;
+  $('mcRec').classList.toggle('on',recording);
+  toast(recording?'录像标记已开（需本地流支持）':'已停止录像标记',recording?'ok':'');
+};
+$('mcEstop').onclick=()=>{estop(); if(S.nav2) pub('/web/stop_nav2','std_msgs/Empty',{})};
+
+function renderMenu(){
+  var m=$('menu'); m.innerHTML='';
+  function add(label,cls,fn,id){
+    var b=document.createElement('button'); b.className='mbtn '+(cls||''); b.textContent=label;
+    if(id)b.id=id; b.onclick=fn; m.appendChild(b); return b;
+  }
+  if(UI.route==='map'){
+    add('开始建图','primary',startMapping,'btnStartMap');
+    add('停止建图','is-off',stopMapping,'btnStopMap');
+    add('保存地图','is-off',saveMapping,'btnSaveMap');
+    var inp=document.createElement('input'); inp.id='mapName'; inp.value='map_live';
+    inp.placeholder='地图名';
+    m.appendChild(inp);
+    syncMapButtons();
+  }
+  if(UI.route==='nav'){
+    var sel=document.createElement('select'); sel.id='mapSelect';
+    sel.style.cssText='padding:7px 10px;border-radius:999px;border:1px solid var(--line);background:var(--panel2);max-width:140px';
+    m.appendChild(sel);
+    add('启动导航','primary',startNav,'btnStartNav');
+    add('关闭导航','danger',stopNav,'btnStopNav');
+    add('换地图','',changeNavMap,'btnSwapMap');
+    refreshMapSelect();
+    renderNavTools();
+  }else{
+    var tb=$('tools'); if(tb)tb.innerHTML='';
+  }
+  highlightNext();
+}
+
+function renderNavTools(){
+  var box=$('tools'); if(!box)return;
+  box.innerHTML='';
+  function addT(label,cls,fn,id){
+    var b=document.createElement('button');
+    b.className='mbtn '+(cls||'');
+    b.textContent=label;
+    if(id)b.id=id;
+    b.onclick=fn;
+    box.appendChild(b);
+    return b;
+  }
+  addT('设初始位姿','',()=>setArmed('init'),'btnArmInit');
+  addT('重新定位','',requestRelocalize,'btnReloc');
+  addT('设目标','',()=>setArmed('goal'),'btnArmGoal');
+  addT('取消目标','',()=>{
+    pub('/web/nav_cancel','std_msgs/Empty',{});
+    toast('已取消目标');
+  },'btnCancelGoal');
+}
+
+function highlightNext(){
+  document.querySelectorAll('.mbtn.next').forEach(b=>b.classList.remove('next'));
+  if(UI.route==='map'){
+    syncMapButtons();
+    if(S.nav2){
+      /* 导航占用 LIO：建图页不引导开始建图 */
+    }else if(!mappingSession && mappingPhase!=='stopped'){
+      var b=$('btnStartMap'); if(b&&!b.disabled)b.classList.add('next');
+    }else if(mappingSession){
+      var b=$('btnStopMap'); if(b&&!b.disabled)b.classList.add('next');
+    }else if(mapPcdReady){
+      var b=$('btnSaveMap'); if(b&&!b.disabled)b.classList.add('next');
+    }
+  }
+  if(UI.route==='nav'){
+    if(!S.nav2) $('btnStartNav')&&$('btnStartNav').classList.add('next');
+    else if(initP.x==null && !locReady){
+      var r=$('btnReloc'); if(r)r.classList.add('next');
+      else $('btnArmInit')&&$('btnArmInit').classList.add('next');
+    }else if(initP.x==null) $('btnArmInit')&&$('btnArmInit').classList.add('next');
+    else $('btnArmGoal')&&$('btnArmGoal').classList.add('next');
+  }
+  $('btnArmInit')&&$('btnArmInit').classList.toggle('armed',armed==='init');
+  $('btnArmGoal')&&$('btnArmGoal').classList.toggle('armed',armed==='goal');
+}
+function syncMapButtons(){
+  var start=$('btnStartMap'), stop=$('btnStopMap'), save=$('btnSaveMap');
+  if(!start||!stop||!save)return;
+  var running=!!mappingSession;
+  var canSave=mapPcdReady && !running && !S.nav2;
+  function setBtn(el, on, kind){
+    el.disabled=!on;
+    el.className='mbtn '+(on?kind:'is-off');
+  }
+  setBtn(start, !running && !S.nav2, 'primary');
+  setBtn(stop, running, 'danger');
+  setBtn(save, canSave, 'ok');
+}
+function mappingActive(){ return !!mappingSession; }
+function syncCloudSub(){
+  if(UI.route!=='map' || !connected){
+    if(Map3D.cloudSub && Map3D.cloudSub.unsubscribe){
+      try{Map3D.cloudSub.unsubscribe()}catch(e){}
+      Map3D.cloudSub=null;
+    }
+    return;
+  }
+  if(mappingActive()){
+    if(!Map3D.cloudSub){
+      try{ Map3D.cloudSub=sub('/cloud_registered','sensor_msgs/PointCloud2',ingestCloud,200); }
+      catch(e){console.warn(e)}
+    }
+  }else if(Map3D.cloudSub){
+    try{Map3D.cloudSub.unsubscribe()}catch(e){}
+    Map3D.cloudSub=null;
+  }
+}
+function refreshMapStatus(cb){
+  httpGet(API+'/api/mapping/status',r=>{
+    if(!r){cb&&cb(null);return}
+    if(r.fastlio!=null)S.fastlio=!!r.fastlio;
+    if(r.map_building!=null)S.map_building=!!r.map_building;
+    // 导航模式下的 LIO 不是建图会话
+    if(S.nav2){
+      mappingSession=false;
+      if(mappingPhase==='running') mappingPhase='idle';
+    }
+    mapPcdReady=!!(r.pcd_ready || (r.pcd_exists && !mappingSession));
+    if(mappingSession && S.fastlio) mappingPhase='running';
+    else if(mappingSession && !S.fastlio) mappingPhase='idle';
+    else if(!mappingSession && mapPcdReady && mappingPhase!=='saved') mappingPhase='stopped';
+    else if(!mappingSession && !mapPcdReady && mappingPhase==='running') mappingPhase='idle';
+    syncCloudSub();
+    syncMapButtons(); renderSide(); setConn(connected);
+    var w=$('map3dWait');
+    if(w){
+      if(S.nav2){
+        w.textContent='导航运行中：定位用 LIO 已占用，请先「关闭导航」再建图';
+        w.classList.remove('hide');
+      }else if(mappingActive()) w.classList.remove('hide');
+      else { w.textContent='点「开始建图」后显示实时点云'; w.classList.remove('hide'); }
+    }
+    cb&&cb(r);
+  },()=>cb&&cb(null));
+}
+
+function updateHint(){
+  var h=$('hintStrip');
+  if(UI.route==='map'){
+    h.textContent=S.nav2?'导航占用定位 LIO：请先关闭导航，再建图'
+      :!mappingSession&&mappingPhase!=='stopped'?'点「开始建图」，等激光亮起后用左摇杆慢走覆盖'
+      :mappingSession?'建图中：左摇杆平移，右摇杆转向；覆盖完后点「停止」或直接「保存地图」'
+      :mappingPhase==='stopped'?'点「保存地图」转成 PGM（约十几秒）':'建图：开始 → 遥控覆盖 → 停止/保存';
+  }else if(UI.route==='nav'){
+    h.textContent=!S.nav2?'选地图后点「启动导航」（会拉起定位 + 自动重定位）'
+      :armed==='init'?'在地图上按住拖出车头朝向 → 松手设姿'
+      :armed==='goal'?'在地图上按住拖出朝向 → 松手下发目标'
+      :relocBusy?'正在激光匹配黑障碍，请稍候…'
+      :!locReady&&initP.x==null?'自动匹配未贴墙时请「设初始位姿」，系统会在附近精修'
+      :!locReady?'已设初值，等待附近精修对齐…'
+      :navStatus==='navigating'||navStatus==='active'?'导航中… 急停 / 取消目标可停'
+      :'定位就绪后点「设目标」下发';
+  }
+}
+
+function renderSide(){
+  var el=$('sideInfo');
+  if(!el)return;
+  var poseLine='<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)">'+
+    '<div><svg class="ic" style="width:13px;height:13px"><use href="#i-pos"/></svg> 位置 <b id="sPos">'+robot.x.toFixed(2)+', '+robot.y.toFixed(2)+'</b></div>'+
+    '<div><svg class="ic" style="width:13px;height:13px"><use href="#i-yaw"/></svg> 航向 <b id="sYaw">'+deg(robot.yaw)+'°</b></div>'+
+    '<div><svg class="ic" style="width:13px;height:13px"><use href="#i-speed"/></svg> 速度 <b id="sVel">'+(robot.spd!=null?robot.spd.toFixed(2):'-')+' m/s</b></div></div>';
+  if(UI.route==='map'){
+    var st=mappingSession?'建图运行中':(S.nav2?'定位LIO占用中':(mapPcdReady?'已停止·可保存':(mappingPhase==='saved'?'已保存':'空闲')));
+    var pcd=mapPcdReady?'有 PCD':'无 PCD';
+    el.innerHTML='<div><b>建图状态</b></div>'+
+      '<div>状态 <b id="mSt">'+st+'</b></div>'+
+      '<div>FAST-LIO <b>'+(S.fastlio?(mappingSession?'建图':'定位'):'停止')+'</b></div>'+
+      '<div>位姿质量 <b id="mLioQ">检测中</b></div>'+
+      '<div>点云预览 <b id="mPts">-</b></div>'+
+      '<div>地面校平 <b id="mGnd">-</b></div>'+
+      '<div>落盘 <b>'+pcd+'</b></div>'+
+      '<div style="margin-top:6px;font-size:11px;color:var(--dim)">左摇杆平移 · 右摇杆转向</div>'+
+      '<div style="margin-top:4px;font-size:11px;color:var(--dim)">灰蓝=近地 · 彩=高度 · LIO抖时跳过累积</div>'+poseLine;
+  }else{
+    el.innerHTML='<div><b>导航</b></div>'+
+      '<div>Nav2 <b>'+(S.nav2?'运行中':'未启动')+'</b></div>'+
+      '<div>状态 <b>'+navStatus+'</b></div>'+
+      '<div>地图 <b>'+(UI.activeMap||UI.selMap||'-')+'</b></div>'+
+      '<div>LIO/扫描 <b>'+(S.fastlio?'LIO':'无LIO')+' / '+(S.scan?(scanPts&&scanPts.length?(scanPts.length/2|0)+'点':'无数据'):'未启动')+'</b></div>'+
+      '<div>定位 <b>'+(locReady?'已对齐(贴墙)':(relocBusy?'匹配中…':(initP.x!=null?'精修中/待确认':'待定·可设初值')))+'</b></div>'+
+      '<div>初值 <b>'+(initP.x==null?'-':initP.x.toFixed(2)+','+initP.y.toFixed(2))+'</b></div>'+
+      '<div>目标 <b>'+(goal.x==null?'-':goal.x.toFixed(2)+','+goal.y.toFixed(2))+'</b></div>'+
+      '<div style="margin-top:6px;font-size:11px;color:var(--dim)">图例：白=可通行 · 黑=障碍 · 灰=未知</div>'+
+      '<div style="margin-top:4px;font-size:11px;color:var(--dim)">右侧工具：初始位姿 / 重定位 / 目标</div>'+poseLine;
+  }
+}
+function syncPoseSide(){
+  var a=$('sPos'),b=$('sYaw'),c=$('sVel');
+  if(a)a.textContent=robot.x.toFixed(2)+', '+robot.y.toFixed(2);
+  if(b)b.textContent=deg(robot.yaw)+'°';
+  if(c)c.textContent=(robot.spd!=null?robot.spd.toFixed(2):'-')+' m/s';
+  var q=$('mLioQ');
+  if(q){
+    if(!lioQual.last.init){q.textContent='检测中';q.style.color='';}
+    else if(lioQual.ok){
+      q.textContent='稳 · Δ'+lioQual.jumpXy.toFixed(2)+'m / '+lioQual.jumpYawDeg.toFixed(1)+'°';
+      q.style.color='';
+    }else{
+      q.textContent='LIO跳变·已锁位姿 · Δ'+lioQual.jumpXy.toFixed(2)+'m / '+lioQual.jumpYawDeg.toFixed(1)+'°';
+      q.style.color='#f87171';
+    }
+  }
+}
+function setBar(id,pct,tileId){
+  var el=$(id); if(!el)return;
+  var p=pct==null?0:clamp(+pct,0,100);
+  el.style.width=p+'%';
+  var tile=$(tileId); if(!tile)return;
+  tile.classList.remove('warn','err','ok','mid');
+  if(tileId==='tileBatt'){
+    // >75 绿 · 30–75 黄 · 20–30 橙 · <20 红
+    if(p>75)tile.classList.add('ok');
+    else if(p>=30)tile.classList.add('warn');
+    else if(p>=20)tile.classList.add('mid');
+    else tile.classList.add('err');
+  }else{
+    if(p>=90)tile.classList.add('err');
+    else if(p>=75)tile.classList.add('warn');
+  }
+}
+
+/* ---- ROS ---- */
+function connect(){
+  if(ros)try{ros.close()}catch(e){}
+  rosUrl=$('rosUrl').value.trim()||rosUrl;
+  localStorage.setItem('dog_ros_url',rosUrl);
+  ros=new ROSLIB.Ros({url:rosUrl});
+  ros.on('connection',()=>{connected=true;setConn(true);toast('已连接','ok');startSubs()});
+  ros.on('close',()=>{connected=false;subsStarted=false;setConn(false)});
+  ros.on('error',()=>toast('rosbridge 连接失败','err'));
+}
+function setConn(on){
+  $('hDot').className='dot '+(on?'on':'off');
+  $('topDot').className='dot '+(on?'on':'off');
+  $('hSub').textContent=on?(S.nav2?'导航运行中':mappingSession?'建图运行中':'已连接 · 空闲'):'未连接';
+}
+function pub(name,type,msg){
+  if(!connected){toast('未连接','err');return}
+  new ROSLIB.Topic({ros:ros,name:name,messageType:type}).publish(msg);
+}
+function sub(name,type,cb,thr){
+  var t=new ROSLIB.Topic({ros:ros,name:name,messageType:type,throttle_rate:thr||0});
+  t.subscribe(cb);return t;
+}
+function startSubs(){
+  if(subsStarted)return; subsStarted=true;
+  sub('/map_building','nav_msgs/OccupancyGrid',m=>ingest(m,'build'),400);
+  if(UI.route==='map') syncCloudSub();
+  sub('/map','nav_msgs/OccupancyGrid',m=>ingest(m,'nav'));
+  // 导航位姿：只认 /web/robot_pose（web_ops 查 map→base_footprint），避免多源抢写导致红点闪
+  var _navPoseTs=0;
+  sub('/web/robot_pose','geometry_msgs/PoseStamped',m=>{
+    if(UI.route==='map')return;
+    var p=m.pose.position, q=m.pose.orientation;
+    feedNavPose(p.x,p.y,yawOf(q),p.z,q);
+    _navPoseTs=Date.now();
+    syncPoseSide(); draw();
+  },80);
+  sub('/amcl_pose','geometry_msgs/PoseWithCovarianceStamped',m=>{
+    if(UI.route==='map')return;
+    // 仅当 web 位姿掉线 >0.8s 时兜底
+    if(Date.now()-_navPoseTs<800)return;
+    var p=m.pose.pose.position, q=m.pose.pose.orientation;
+    feedNavPose(p.x,p.y,yawOf(q),p.z,q);
+    syncPoseSide(); draw();
+  },100);
+  var tf=new ROSLIB.TFClient({ros:ros,fixedFrame:'map',angularThres:0.02,transThres:0.01});
+  tf.subscribe('base_link',t=>{
+    if(UI.route==='map')return;
+    if(Date.now()-_navPoseTs<800)return;
+    feedNavPose(t.translation.x,t.translation.y,yawOf(t.rotation),t.translation.z,t.rotation);
+    syncPoseSide(); draw();
+  });
+  // FAST-LIO 里程计：与 /cloud_registered 同在 camera_init，建图页狗位姿以此为准
+  sub('/Odometry','nav_msgs/Odometry',m=>{
+    if(UI.route!=='map')return;
+    var p=m.pose.pose.position, q=m.pose.pose.orientation;
+    feedRobotPose(p.x,p.y,yawOf(q),p.z,q);
+    robot.spd=Math.hypot(m.twist.twist.linear.x,m.twist.twist.linear.y);
+    syncPoseSide();
+  },80);
+  sub('/odom_nav','nav_msgs/Odometry',m=>{
+    robot.spd=Math.hypot(m.twist.twist.linear.x,m.twist.twist.linear.y);
+    if(UI.route==='map')return;
+    // 仅在未开 Nav2 时用里程计凑合显示；开了导航必须用 map 系（/web/robot_pose）
+    if(!S.nav2){
+      var p=m.pose.pose.position;
+      feedNavPose(p.x,p.y,yawOf(m.pose.pose.orientation),p.z,m.pose.pose.orientation);
+      draw();
+    }
+    syncPoseSide();
+  },100);
+  sub('/battery_state','sensor_msgs/BatteryState',m=>{
+    var pct=m.percentage!=null?(m.percentage*100):null;
+    var txt=pct!=null?pct.toFixed(0)+'%':'-';
+    $('tBatt').textContent=txt;
+    if($('mcBatt'))$('mcBatt').textContent=txt;
+    setBar('barBatt',pct,'tileBatt');
+  });
+  sub('/robot_ctrl_mode','std_msgs/Int32',m=>{
+    var n={0:'趴下阻尼',1:'站立',10:'自由趴下',18:'运动',21:'动作中',51:'躺下中'}[m.data]||('模式'+m.data);
+    $('tMode').textContent=n;
+  });
+  sub('/web/nav_status','std_msgs/String',m=>{
+    navStatus=m.data.split(':')[0];
+    if(navStatus==='reached')toast('已到达目标','ok');
+    if(navStatus==='aborted')toast('导航失败','err');
+    updateHint();highlightNext();renderSide();
+  });
+  sub('/web/sys_status','std_msgs/String',m=>{
+    try{Object.assign(S,JSON.parse(m.data))}catch(e){}
+    setCtrlLabel(S.bridge?'SDK':'APP');
+    renderChips();setConn(connected);updateHint();highlightNext();renderSide();
+    $('sbMap').textContent=mappingSession?'建图中…':(mappingPhase==='stopped'?'可保存':'未建图');
+    $('sbNav').textContent=S.nav2?('运行 · '+navStatus):'未启动';
+  });
+  sub('/plan','nav_msgs/Path',m=>{path=m;draw()},120);
+  // /scan：保留上一帧，避免空圈导致红点闪烁
+  sub('/scan','sensor_msgs/LaserScan',m=>{
+    var pts=[], a=m.angle_min, rmin=m.range_min||0.05, rmax=m.range_max||30;
+    for(var i=0;i<m.ranges.length;i++,a+=m.angle_increment){
+      var r=m.ranges[i];
+      if(!isFinite(r)||r<rmin||r>rmax)continue;
+      pts.push(r*Math.cos(a), r*Math.sin(a));
+    }
+    if(pts.length>=8){ scanPts=pts; scanPtsTs=Date.now(); }
+    if(UI.route==='nav')draw();
+  },80);
+  refreshSys(); setInterval(refreshSys,5000);
+}
+function ingest(m,which){
+  var meta={width:m.info.width,height:m.info.height,resolution:m.info.resolution,origin:m.info.origin};
+  var data=new Int8Array(m.data.length); for(var i=0;i<m.data.length;i++)data[i]=m.data[i];
+  if(which==='build'){buildMeta=meta;buildData=data} else {navMeta=meta;navData=data}
+  draw();
+}
+function renderChips(){
+  var box=$('hChips'); box.innerHTML='';
+  var map={livox:'激光',bridge:'底盘',fastlio:'LIO',map_building:'预览',scan:'扫描',nav2:'导航',auto_relocalize:'重定位',rosbridge:'桥接'};
+  Object.keys(map).forEach(k=>{
+    var s=document.createElement('span'); s.className='chip';
+    s.innerHTML='<span class="dot '+(S[k]?'on':'off')+'"></span>'+map[k];
+    box.appendChild(s);
+  });
+  $('topChipTxt').textContent=UI.route==='map'?(mappingSession?'建图中':(S.nav2?'导航占用':'空闲')):(S.nav2?'Nav2':'待命');
+}
+
+/* ---- mapping / nav actions ---- */
+function startMapping(){
+  if(S.nav2){toast('请先关闭导航','err');return}
+  if(mappingSession||mappingPhase==='running'){toast('建图已在运行','err');return}
+  toast('清理 PCD 并启动建图…');
+  httpPost(API+'/api/mapping/start',{},r=>{
+    if(!r||!r.ok){toast((r&&r.error)||'启动失败','err');return}
+    mappingSession=true;
+    mappingPhase='running'; mapPcdReady=false;
+    clearMapCloud();
+    if(r.cleared&&r.cleared.length)toast('已清缓存 '+r.cleared.join(',')+'，建图启动中','ok');
+    else toast('建图启动中，约 10 秒后慢走覆盖','ok');
+    pub('/web/mapping','std_msgs/Empty',{});
+    updateHint();syncMapButtons();highlightNext();renderSide();
+    setTimeout(()=>refreshMapStatus(),2500);
+  },e=>toast('启动失败','err'));
+}
+function stopMapping(){
+  if(!mappingSession && mappingPhase!=='running'){toast('当前未在建图','err');return}
+  if(!confirm('停止建图并保存点云 PCD？（稍后可转 PGM）'))return;
+  toast('正在停止并落盘 PCD…');
+  httpPost(API+'/api/mapping/stop',{},r=>{
+    mapPcdReady=!!(r&&r.pcd_ready);
+    mappingSession=false;
+    S.fastlio=false;
+    mappingPhase=mapPcdReady?'stopped':'idle';
+    if(mapPcdReady) toast('已停止，PCD 就绪（'+(Math.round((r.pcd_size||0)/1024))+' KB），可点「保存地图」','ok');
+    else toast((r&&r.error)||'已停止但没有 PCD：请重新「开始建图」覆盖后再停止','err');
+    updateHint();syncMapButtons();highlightNext();renderSide();
+    refreshMapStatus();
+  },()=>toast('停止失败','err'));
+}
+function saveMapping(){
+  if(S.nav2){toast('请先关闭导航','err');return}
+  if(mappingSession||mappingPhase==='running'){toast('请先停止建图','err');return}
+  if(!mapPcdReady){toast('无可用 PCD，无法保存','err');return}
+  var name=($('mapName')&&$('mapName').value.trim())||'map_live';
+  if(!confirm('将 PCD 转为 2D 栅格地图「'+name+'.pgm」？'))return;
+  toast('正在转换为 PGM…');
+  httpPost(API+'/api/mapping/save',{name:name},r=>{
+    if(r.ok){mappingSession=false;mappingPhase='saved';mapPcdReady=false;freshMap=r.name;UI.selMap=r.name;localStorage.setItem('dog_selMap',r.name);toast('地图已保存：'+r.name,'ok');setTimeout(()=>go('maps'),500)}
+    else toast('保存失败: '+(r.error||''),'err');
+    updateHint();syncMapButtons();highlightNext();
+  },e=>toast('保存失败','err'));
+}
+function refreshMapSelect(){
+  var sel=$('mapSelect'); if(!sel)return;
+  httpGet(API+'/api/maps',r=>{
+    var cur=sel.value||UI.selMap; sel.innerHTML='';
+    (r.maps||[]).forEach(m=>{var o=document.createElement('option');o.value=m.name;o.textContent=m.name;sel.appendChild(o)});
+    if(cur)sel.value=cur;
+    if(sel.value){UI.selMap=sel.value;localStorage.setItem('dog_selMap',sel.value)}
+    sel.onchange=function(){UI.selMap=sel.value;localStorage.setItem('dog_selMap',sel.value)};
+    $('sbMaps').textContent=(r.maps||[]).length+' 张';
+    $('mapsCount').textContent=(r.maps||[]).length;
+  });
+}
+function setNavMap(name){
+  UI.selMap=name;
+  localStorage.setItem('dog_selMap',name);
+  var sel=$('mapSelect'); if(sel){sel.value=name}
+  if(S.nav2){
+    if(confirm('导航运行中，立刻换成「'+name+'」并重定位？')){
+      toast('正在热加载地图…');
+      httpPost(API+'/api/nav2/reload_map',{map:name,reloc:true},r=>{
+        if(r.ok){
+          UI.activeMap=name;
+          locReady=!!(r.reloc&&r.reloc.ok);
+          initP={x:null,y:null,yaw:0};
+          toast(locReady?'换图并重定位成功':'换图成功，请手动设姿或再点重新定位',locReady?'ok':'');
+        }else toast(r.error||'换图失败','err');
+        updateHint();highlightNext();renderSide();
+      },()=>toast('换图失败','err'));
+    }
+    return;
+  }
+  toast('已设为导航地图：'+name,'ok');
+  refreshMaps();
+}
+function startNav(){
+  if(mappingSession){toast('请先停止建图（导航会单独拉起定位用 LIO）','err');return}
+  if(window._navStarting){toast('正在启动导航…');return}
+  var map=($('mapSelect')&&$('mapSelect').value)||UI.selMap;
+  if(!map){toast('请先在地图库选择/设为导航地图','err');return}
+  UI.selMap=map;localStorage.setItem('dog_selMap',map);
+  window._navStarting=true;
+  locReady=false; relocBusy=false;
+  mappingSession=false;
+  toast('正在启动定位 + Nav2 + 自动重定位…');
+  httpPost(API+'/api/nav2/start',{map:map},r=>{
+    window._navStarting=false;
+    if(r.ok){
+      UI.activeMap=r.map||map;
+      initP={x:null,y:null,yaw:0}; goal={x:null,y:null,yaw:0};
+      S.nav2=true;
+      mappingSession=false;
+      toast(r.hint||'已启动：等待自动重定位，也可手动设姿','ok');
+      setTimeout(function(){ pollRelocHint(); }, 8000);
+    }else toast(r.error||'失败','err');
+    updateHint();highlightNext();renderSide();refreshSys();
+  },()=>{window._navStarting=false;toast('启动失败','err')});
+}
+function stopNav(){
+  httpPost(API+'/api/nav2/stop',{},r=>{
+    S.nav2=false; locReady=false; relocBusy=false; UI.activeMap='';
+    armed=''; if($('cv'))$('cv').classList.remove('cross');
+    toast('已关闭导航','ok');
+    updateHint();highlightNext();renderSide();refreshSys();
+  },()=>{
+    pub('/web/stop_nav2','std_msgs/Empty',{});
+    S.nav2=false; toast('已请求关闭导航');
+    updateHint();highlightNext();renderSide();
+  });
+}
+function requestRelocalize(){
+  if(!S.nav2){toast('请先启动导航','err');return}
+  if(relocBusy){toast('重定位进行中…');return}
+  relocBusy=true; locReady=false; updateHint();renderSide();
+  toast(initP.x!=null?'正在初值附近 ICP 贴墙…':'请先「设初始位姿」，再点重新定位做 ICP');
+  httpPost(API+'/api/nav2/relocalize',{},r=>{
+    relocBusy=false;
+    if(r.ok){
+      locReady=true;
+      toast('ICP 对齐成功（激光贴障碍）','ok');
+    }else{
+      locReady=false;
+      toast((r.error||'ICP未收敛')+' — 请对准所在位置「设初始位姿」','err');
+      setArmed('init');
+    }
+    updateHint();highlightNext();renderSide();
+  },()=>{relocBusy=false;toast('重定位请求失败','err');updateHint();renderSide()});
+}
+function changeNavMap(){
+  var map=($('mapSelect')&&$('mapSelect').value)||UI.selMap;
+  if(!map){toast('请先在下拉框选一张图','err');return}
+  setNavMap(map);
+}
+function pollRelocHint(){
+  if(!S.nav2||locReady)return;
+  httpGet(API+'/api/log?file=auto_relocalize.log&n=50',r=>{
+    var t=(r&&r.log)||'';
+    if(/请设初始位姿|need_init|重定位拒绝/.test(t) && !/重定位成功:[^\n]*hit=/.test(t.slice(-800))){
+      // 全局失败：引导手设初值（只 toast 一次）
+      if(!window._needInitToast){
+        window._needInitToast=true;
+        toast('自动匹配未贴墙 — 请「设初始位姿」，系统会在附近精修','err');
+        updateHint();highlightNext();renderSide();
+      }
+    }
+    // 成功：ICP成功 或 带 hit=
+    if(/ICP成功:[^\n]*hit=([0-9.]+)/.test(t) || /ICP成功/.test(t)){
+      var hm=t.match(/ICP成功:[^\n]*hit=([0-9.]+)/);
+      if(!hm || parseFloat(hm[1])>=30){
+        locReady=true; window._needInitToast=false;
+        toast('ICP 对齐成功（激光贴障碍）','ok');
+        updateHint();highlightNext();renderSide();
+        return;
+      }
+    }
+    var m=t.match(/重定位成功:[^\n]*hit=([0-9.]+)%/g);
+    if(!m||!m.length)return;
+    var last=m[m.length-1], hm=last.match(/hit=([0-9.]+)/), tm=last.match(/tight=([0-9.]+)/);
+    if(hm&&parseFloat(hm[1])>=40 && tm&&parseFloat(tm[1])>=0.45){
+      locReady=true; window._needInitToast=false;
+      toast('自动重定位成功（激光贴障碍）','ok');
+      updateHint();highlightNext();renderSide();
+    }
+  },()=>{});
+}
+setInterval(function(){ if(S.nav2&&!locReady) pollRelocHint(); }, 4000);
+function setArmed(mode){
+  if(!S.nav2){toast('请先启动导航','err');return}
+  if(mode==='goal'&&!locReady&&initP.x==null){
+    toast('定位尚未就绪：先等自动重定位，或点「重新定位」/「设初始位姿」','err');
+    // 仍允许 armed 预标记，但提示诚实
+  }
+  armed=(armed===mode)?'':mode;
+  $('cv').classList.toggle('cross',!!armed);
+  highlightNext(); updateHint();
+  if(armed==='init')toast('按住拖出车头朝向 → 松手');
+  if(armed==='goal')toast(locReady||initP.x!=null?'按住拖出朝向 → 松手下发':'可预标记，定位就绪后才会真正下发');
+}
+
+
+/* ---- map page: Three.js point cloud ----
+   雷达在狗头上方俯仰约 -45°（pitch_down=+0.785，低头看地）。
+   对 /cloud_registered 先按标定俯仰校平到水平，再用一次 RANSAC 锁残余倾角。
+   不校平则地面与墙搅在一起，看不出障碍。 */
+var MapGnd={
+  pitch:0.7853981634, roll:0, z:0.45, // 安装俯仰(低头) + 雷达离地
+  n:null, src:'nom', fitDone:false, fitDeg:0, mountPitch:0.7853981634,
+  level:true, groundThr:0.10, minH:-0.08, maxH:2.0,
+  zMeas:null
+};
+var MapCloud={
+  pos:new Float32Array(3*180000), n:0, dirty:true,
+  frames:[], liveN:0, keep:14,
+  gndN:0, obsN:0, lastFramePts:0
+};
+function loadLidarExtrinsic(){
+  httpGet(API+'/api/lidar_extrinsic',function(r){
+    if(!r||!r.ok)return;
+    // 优先 leveling 用 pitch_down；若为 0 但有 mount_pitch_down 则用安装角
+    var pd=r.pitch_down!=null?+r.pitch_down:null;
+    var mp=r.mount_pitch_down!=null?+r.mount_pitch_down:(r.lidar_pitch!=null?Math.abs(+r.lidar_pitch):null);
+    if(pd!=null && Math.abs(pd)>1e-3) MapGnd.pitch=pd;
+    else if(mp!=null && Math.abs(mp)>1e-3) MapGnd.pitch=Math.abs(mp);
+    if(r.roll!=null)MapGnd.roll=+r.roll;
+    if(r.lidar_z!=null)MapGnd.z=+r.lidar_z;
+    MapGnd.mountPitch=mp;
+    MapGnd.src='file';
+    MapGnd.fitDone=false; MapGnd.n=null;
+    if(Map3D.ready){ Map3D.levM=levelMat(); MapCloud.dirty=true; }
+  });
+}
+loadLidarExtrinsic();
+function nominalUp(){
+  var sp=Math.sin(MapGnd.pitch),cp=Math.cos(MapGnd.pitch);
+  var sr=Math.sin(MapGnd.roll),cr=Math.cos(MapGnd.roll);
+  return [-sp, sr*cp, cr*cp];
+}
+function groundNormal(){ return MapGnd.n||nominalUp(); }
+function levelMat(){
+  var u=groundNormal();
+  var len=Math.hypot(u[0],u[1],u[2])||1;
+  u=[u[0]/len,u[1]/len,u[2]/len];
+  var c=u[2];
+  if(c>0.999999)return [1,0,0, 0,1,0, 0,0,1];
+  if(c<-0.999999)return [1,0,0, 0,-1,0, 0,0,-1];
+  var vx=u[1], vy=-u[0];
+  var k=1/(1+c);
+  return [
+    1-vy*vy*k,  vx*vy*k,   vy,
+    vx*vy*k,   1-vx*vx*k, -vx,
+    -vy,        vx,        1-(vx*vx+vy*vy)*k
+  ];
+}
+function mulMat3(m,x,y,z){
+  return [m[0]*x+m[1]*y+m[2]*z, m[3]*x+m[4]*y+m[5]*z, m[6]*x+m[7]*y+m[8]*z];
+}
+function groundZOff(){ return MapGnd.z; }
+/** 俯仰系下估测离地：沿标定 up 的近地峰 */
+function updateGroundHeight(xs,ys,zs,n,up){
+  if(n<40)return;
+  var bins=36, z0=-1.2, z1=-0.05, bw=(z1-z0)/bins;
+  var hist=new Int32Array(bins);
+  for(var i=0;i<n;i++){
+    var h=up[0]*xs[i]+up[1]*ys[i]+up[2]*zs[i];
+    if(h<z0||h>z1)continue;
+    var b=((h-z0)/bw)|0;
+    if(b>=0&&b<bins)hist[b]++;
+  }
+  var need=Math.max(10,(n/35)|0), lowPeak=-1;
+  for(var b=0;b<bins;b++){
+    if(hist[b]>=need){lowPeak=b;break}
+  }
+  if(lowPeak<0)return;
+  var fitted=-(z0+(lowPeak+0.5)*bw);
+  if(!(fitted>0.15 && fitted<1.2))return;
+  if(Math.abs(fitted-MapGnd.z)>0.18){
+    MapGnd.zMeas=fitted;
+    return;
+  }
+  if(MapGnd.zMeas==null)MapGnd.zMeas=fitted;
+  else MapGnd.zMeas=MapGnd.zMeas*0.9+fitted*0.1;
+}
+/** 先用 45° 标定法向，累积够点后 RANSAC 一次修正残余倾角 */
+function tryFitGroundOnce(){
+  if(MapGnd.fitDone || MapCloud.n<2000)return;
+  var stride=Math.max(1,(MapCloud.n/8000)|0);
+  var cands=[];
+  var up0=nominalUp(); // 含 45° 安装俯仰
+  for(var i=0;i<MapCloud.n;i+=stride){
+    var x=MapCloud.pos[i*3], y=MapCloud.pos[i*3+1], z=MapCloud.pos[i*3+2];
+    var h=up0[0]*x+up0[1]*y+up0[2]*z;
+    if(h>-1.4 && h<0.35) cands.push([x,y,z]);
+  }
+  if(cands.length<150){ MapGnd.fitDone=true; MapGnd.n=up0; if(Map3D.ready) Map3D.levM=levelMat(); return; }
+  var bestN=null, bestCnt=0;
+  for(var t=0;t<80;t++){
+    var i0=(Math.random()*cands.length)|0, i1=(Math.random()*cands.length)|0, i2=(Math.random()*cands.length)|0;
+    if(i0===i1||i0===i2||i1===i2)continue;
+    var a=cands[i0], b=cands[i1], c=cands[i2];
+    var ab=[b[0]-a[0],b[1]-a[1],b[2]-a[2]];
+    var ac=[c[0]-a[0],c[1]-a[1],c[2]-a[2]];
+    var nx=ab[1]*ac[2]-ab[2]*ac[1], ny=ab[2]*ac[0]-ab[0]*ac[2], nz=ab[0]*ac[1]-ab[1]*ac[0];
+    var nl=Math.hypot(nx,ny,nz); if(nl<1e-6)continue;
+    nx/=nl; ny/=nl; nz/=nl;
+    if(nx*up0[0]+ny*up0[1]+nz*up0[2]<0){nx=-nx;ny=-ny;nz=-nz}
+    // 须接近标定 up（约 45°），拒绝墙面
+    if(nx*up0[0]+ny*up0[1]+nz*up0[2]<0.85)continue;
+    var d=-(nx*a[0]+ny*a[1]+nz*a[2]), cnt=0, thr=0.045;
+    for(var j=0;j<cands.length;j++){
+      var p=cands[j];
+      if(Math.abs(nx*p[0]+ny*p[1]+nz*p[2]+d)<thr)cnt++;
+    }
+    if(cnt>bestCnt){bestCnt=cnt;bestN=[nx,ny,nz]}
+  }
+  MapGnd.fitDone=true;
+  if(!bestN || bestCnt<cands.length*0.22){
+    MapGnd.n=up0;
+  }else{
+    MapGnd.n=bestN;
+    var dot=Math.max(-1,Math.min(1, bestN[0]*up0[0]+bestN[1]*up0[1]+bestN[2]*up0[2]));
+    MapGnd.fitDeg=Math.acos(dot)*180/Math.PI;
+  }
+  if(Map3D.ready) Map3D.levM=levelMat();
+  MapCloud.dirty=true;
+}
+function heightColorAbove(h){
+  if(h<MapGnd.groundThr)return [0.45,0.52,0.62];
+  var t=Math.max(0,Math.min(1,(h-MapGnd.groundThr)/1.8));
+  if(t<0.33){var u=t/0.33;return [0.05,0.35+0.45*u,0.95-0.4*u]}
+  if(t<0.66){var u=(t-0.33)/0.33;return [0.1+0.7*u,0.8,0.55-0.4*u]}
+  var u=(t-0.66)/0.34;return [0.8+0.2*u,0.8-0.55*u,0.15]
+}
+function clearMapCloud(){
+  MapCloud.n=0; MapCloud.frames=[]; MapCloud.liveN=0; MapCloud.dirty=true;
+  MapCloud.gndN=0; MapCloud.obsN=0;
+  MapGnd.zMeas=null; MapGnd.fitDone=false; MapGnd.fitDeg=0; MapGnd.n=null;
+  if(Map3D.ready) Map3D.levM=levelMat();
+  poseSmooth={x:0,y:0,yaw:0,z:0,qx:0,qy:0,qz:0,qw:1,init:false};
+  lioQual={ok:true, jumpXy:0, jumpYawDeg:0, skipAccum:0, hold:0,
+    last:{x:0,y:0,yaw:0,t:0,init:false},
+    good:{x:0,y:0,yaw:0,z:0,qx:0,qy:0,qz:0,qw:1,init:false}};
+  if(Map3D.ready && Map3D.points){
+    var g=Map3D.points.geometry;
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0),3));
+    g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(0),3));
+  }
+}
+function pushAccum(xs,ys,zs,n){
+  // 环形：满了丢掉最旧 1/4
+  if(MapCloud.n*3+n*3>MapCloud.pos.length){
+    var keep=Math.floor(MapCloud.pos.length/3*0.75);
+    MapCloud.pos.copyWithin(0, (MapCloud.n-keep)*3);
+    MapCloud.n=keep;
+  }
+  for(var i=0;i<n;i++){
+    var o=MapCloud.n*3;
+    MapCloud.pos[o]=xs[i]; MapCloud.pos[o+1]=ys[i]; MapCloud.pos[o+2]=zs[i];
+    MapCloud.n++;
+  }
+  MapCloud.dirty=true;
+}
+function rebuildMapPoints(){
+  if(!Map3D.ready)return;
+  var m=Map3D.levM||levelMat();
+  Map3D.levM=m;
+  var zoff=groundZOff();
+  var maxDraw=90000;
+  var stride=Math.max(1, Math.ceil(MapCloud.n/maxDraw));
+  var cap=Math.floor(MapCloud.n/stride)+8;
+  var pos=new Float32Array(cap*3), col=new Float32Array(cap*3);
+  var kept=0,gnd=0,obs=0;
+  for(var i=0;i<MapCloud.n;i+=stride){
+    var x=MapCloud.pos[i*3], y=MapCloud.pos[i*3+1], z=MapCloud.pos[i*3+2];
+    var q=mulMat3(m,x,y,z);
+    var hh=q[2]+zoff;
+    if(hh<MapGnd.minH||hh>MapGnd.maxH)continue;
+    pos[kept*3]=q[0]; pos[kept*3+1]=hh; pos[kept*3+2]=-q[1];
+    var c=heightColorAbove(hh);
+    // 累积层略压暗，突出结构
+    col[kept*3]=c[0]*0.72; col[kept*3+1]=c[1]*0.72; col[kept*3+2]=c[2]*0.72;
+    if(hh<MapGnd.groundThr)gnd++; else obs++;
+    kept++;
+  }
+  // 叠最近几帧（更亮、更大视觉权重）
+  for(var fi=0;fi<MapCloud.frames.length;fi++){
+    var fr=MapCloud.frames[fi];
+    for(var i=0;i<fr.length;i+=3){
+      if(kept>=cap-2)break;
+      var q=mulMat3(m,fr[i],fr[i+1],fr[i+2]);
+      var hh=q[2]+zoff;
+      if(hh<MapGnd.minH||hh>MapGnd.maxH)continue;
+      pos[kept*3]=q[0]; pos[kept*3+1]=hh; pos[kept*3+2]=-q[1];
+      var c=heightColorAbove(hh);
+      col[kept*3]=c[0]; col[kept*3+1]=c[1]; col[kept*3+2]=c[2];
+      kept++;
+    }
+  }
+  pos=pos.subarray(0,kept*3); col=col.subarray(0,kept*3);
+  var geo=Map3D.points.geometry;
+  geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col,3));
+  geo.computeBoundingSphere();
+  Map3D.lastN=kept;
+  MapCloud.gndN=gnd; MapCloud.obsN=obs; MapCloud.dirty=false;
+  var el=$('mPts'); if(el)el.textContent=MapCloud.n+' 累积 / 本帧'+MapCloud.lastFramePts;
+  var meas=MapGnd.zMeas!=null?(' · 估测'+(MapGnd.zMeas*100).toFixed(0)+'cm'):'';
+  var ang=' · 俯仰'+(MapGnd.pitch*180/Math.PI).toFixed(0)+'°';
+  var fit=MapGnd.fitDone?(MapGnd.fitDeg>0.5?(' · RANSAC+'+MapGnd.fitDeg.toFixed(1)+'°'):' · 已校平'):' · 校平中';
+  var eg=$('mGnd'); if(eg)eg.textContent='雷达离地标定 '+(MapGnd.z*100).toFixed(0)+'cm'+meas+ang+fit;
+}
+/* D1 Edu 站立外形 (m)：长×宽×高 0.635×0.360×0.420 — 文档 1.3 产品参数 */
+var D1_DIM={L:0.635, W:0.360, H:0.420};
+function dogSilverMats(){
+  // MeshBasic + 关 depthTest：不被点云淹没，银白/青边在彩点里一眼能认
+  var body=new THREE.MeshBasicMaterial({color:0xe8f0f8, depthTest:false, transparent:true, opacity:0.94});
+  var dark=new THREE.MeshBasicMaterial({color:0xb8c4d4, depthTest:false, transparent:true, opacity:0.94});
+  var glow=new THREE.MeshBasicMaterial({color:0x7dd3fc, depthTest:false, transparent:true, opacity:0.9});
+  var edge=new THREE.LineBasicMaterial({color:0x38bdf8, depthTest:false, transparent:true, opacity:1});
+  return {body:body, dark:dark, glow:glow, edge:edge};
+}
+function addMeshEdges(mesh, edgeMat){
+  try{
+    var eg=new THREE.EdgesGeometry(mesh.geometry, 28);
+    var ls=new THREE.LineSegments(eg, edgeMat);
+    ls.renderOrder=12;
+    mesh.add(ls);
+  }catch(e){}
+}
+/** 按智元 D1 站立尺寸搭的高对比四足示意 */
+function makeD1DogViz(){
+  var dog=new THREE.Group();
+  var M=dogSilverMats();
+  var W=D1_DIM.W, H=D1_DIM.H;
+  var bodyH=0.155, bodyY=0.28;
+  var body=new THREE.Mesh(new THREE.BoxGeometry(0.42, bodyH, 0.22), M.body);
+  body.position.y=bodyY; body.renderOrder=11; dog.add(body); addMeshEdges(body, M.edge);
+  var head=new THREE.Mesh(new THREE.BoxGeometry(0.16,0.13,0.18), M.glow);
+  head.position.set(0.28, bodyY+0.02, 0); head.renderOrder=11; dog.add(head); addMeshEdges(head, M.edge);
+  var legX=0.175, legZ=W*0.28;
+  [[legX,legZ],[legX,-legZ],[-legX,legZ],[-legX,-legZ]].forEach(function(xz){
+    var hip=new THREE.Mesh(new THREE.BoxGeometry(0.06,0.05,0.05), M.dark);
+    hip.position.set(xz[0], bodyY-0.06, xz[1]); hip.renderOrder=11; dog.add(hip);
+    var thigh=new THREE.Mesh(new THREE.CylinderGeometry(0.028,0.032,0.13,10), M.body);
+    thigh.position.set(xz[0], 0.195, xz[1]); thigh.renderOrder=11; dog.add(thigh); addMeshEdges(thigh, M.edge);
+    var calf=new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.024,0.14,10), M.dark);
+    calf.position.set(xz[0], 0.075, xz[1]); calf.renderOrder=11; dog.add(calf); addMeshEdges(calf, M.edge);
+    var foot=new THREE.Mesh(new THREE.SphereGeometry(0.032,10,10), M.glow);
+    foot.position.set(xz[0], 0.028, xz[1]); foot.renderOrder=11; dog.add(foot);
+  });
+  var ring=new THREE.Mesh(
+    new THREE.RingGeometry(0.22, 0.32, 48),
+    new THREE.MeshBasicMaterial({color:0x38bdf8, side:THREE.DoubleSide, depthTest:false, transparent:true, opacity:0.85})
+  );
+  ring.rotation.x=-Math.PI/2; ring.position.y=0.015; ring.renderOrder=10; dog.add(ring);
+  var disc=new THREE.Mesh(
+    new THREE.CircleGeometry(0.18, 32),
+    new THREE.MeshBasicMaterial({color:0xe0f2fe, side:THREE.DoubleSide, depthTest:false, transparent:true, opacity:0.25})
+  );
+  disc.rotation.x=-Math.PI/2; disc.position.y=0.012; disc.renderOrder=9; dog.add(disc);
+  var yawArrow=new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(0, H*0.95, 0), 0.55, 0xfbbf24, 0.14, 0.09);
+  if(yawArrow.cone&&yawArrow.cone.material) yawArrow.cone.material.depthTest=false;
+  if(yawArrow.line&&yawArrow.line.material) yawArrow.line.material.depthTest=false;
+  yawArrow.renderOrder=13; dog.add(yawArrow);
+  var lidarDot=new THREE.Mesh(new THREE.SphereGeometry(0.04,12,12),
+    new THREE.MeshBasicMaterial({color:0xfbbf24, depthTest:false}));
+  lidarDot.position.y=0.45; lidarDot.renderOrder=13; dog.add(lidarDot);
+  dog.userData.lidarDot=lidarDot;
+  dog.userData.d1Viz=true;
+  dog.scale.set(1.12, 1.12, 1.12);
+  return dog;
+}
+function makePlaceholderDog(){ return makeD1DogViz(); }
+function styleGo2AsSilver(meshGeo){
+  var M=dogSilverMats();
+  var mat=new THREE.MeshBasicMaterial({color:0xe8f0f8, depthTest:false, transparent:true, opacity:0.92});
+  var mesh=new THREE.Mesh(meshGeo, mat);
+  mesh.renderOrder=11;
+  addMeshEdges(mesh, M.edge);
+  return mesh;
+}
+function loadGo2StandMesh(onReady){
+  fetch('models/go2/go2_stand.bin',{cache:'force-cache'}).then(function(r){
+    if(!r.ok)throw new Error('go2_stand.bin '+r.status);
+    return r.arrayBuffer();
+  }).then(function(buf){
+    var dv=new DataView(buf);
+    var magic=String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
+    if(magic!=='GO2S')throw new Error('bad go2 magic');
+    var nTri=dv.getUint32(4,true);
+    var nFloat=nTri*9;
+    var off=8;
+    var pos=new Float32Array(nFloat);
+    for(var i=0;i<nFloat;i++,off+=4) pos[i]=dv.getFloat32(off,true);
+    off += nFloat; // skip dark vertex colors
+    var geo=new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+    geo.computeVertexNormals();
+    geo.computeBoundingBox();
+    var bb=geo.boundingBox;
+    var sx=D1_DIM.L/Math.max(1e-3, bb.max.x-bb.min.x);
+    var sy=D1_DIM.H/Math.max(1e-3, bb.max.y-bb.min.y);
+    var sz=D1_DIM.W/Math.max(1e-3, bb.max.z-bb.min.z);
+    var s=Math.min(sx,sy,sz)*1.08;
+    var mesh=styleGo2AsSilver(geo);
+    mesh.scale.set(s,s,s);
+    mesh.position.y=-(bb.min.y*s);
+    var g=new THREE.Group();
+    g.add(mesh);
+    var ring=new THREE.Mesh(
+      new THREE.RingGeometry(0.24, 0.34, 48),
+      new THREE.MeshBasicMaterial({color:0x38bdf8, side:THREE.DoubleSide, depthTest:false, transparent:true, opacity:0.85})
+    );
+    ring.rotation.x=-Math.PI/2; ring.position.y=0.015; ring.renderOrder=10; g.add(ring);
+    var yawArrow=new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(0, D1_DIM.H*0.95, 0), 0.55, 0xfbbf24, 0.14, 0.09);
+    if(yawArrow.cone&&yawArrow.cone.material) yawArrow.cone.material.depthTest=false;
+    if(yawArrow.line&&yawArrow.line.material) yawArrow.line.material.depthTest=false;
+    yawArrow.renderOrder=13; g.add(yawArrow);
+    var lidarDot=new THREE.Mesh(new THREE.SphereGeometry(0.04,12,12),
+      new THREE.MeshBasicMaterial({color:0xfbbf24, depthTest:false}));
+    lidarDot.position.y=0.45; lidarDot.renderOrder=13; g.add(lidarDot);
+    g.userData.lidarDot=lidarDot;
+    g.userData.fromGo2=true;
+    onReady&&onReady(g);
+  }).catch(function(e){
+    console.warn('Go2 model load failed, keep D1 placeholder', e);
+  });
+}
+var Map3D={ready:false, renderer:null, scene:null, camera:null, points:null, dog:null, grid:null, anim:0, cloudSub:null, lastN:0, levM:null};
+function ensureMap3d(){
+  if(Map3D.ready || typeof THREE==='undefined')return Map3D.ready;
+  var canvas=$('map3d'); if(!canvas)return false;
+  var w=canvas.clientWidth||800, h=canvas.clientHeight||600;
+  var renderer=new THREE.WebGLRenderer({canvas:canvas, antialias:true, alpha:false});
+  renderer.setPixelRatio(Math.min(devicePixelRatio||1, 2));
+  renderer.setSize(w,h,false);
+  renderer.setClearColor(0x070b12,1);
+  var scene=new THREE.Scene();
+  scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+  var key=new THREE.DirectionalLight(0xffffff, 0.5);
+  key.position.set(4,10,6); scene.add(key);
+  var camera=new THREE.PerspectiveCamera(60, w/h, 0.05, 200);
+  camera.position.set(-6, 8, 10);
+  camera.lookAt(0,0,0);
+  var grid=new THREE.GridHelper(40, 40, 0x2f7ef7, 0x1a2433);
+  grid.position.y=0;
+  scene.add(grid);
+  // 全局大坐标轴易被误当成「狗」；收成小角标
+  var axes=new THREE.AxesHelper(0.35);
+  axes.position.set(0,0.02,0);
+  scene.add(axes);
+  var dog=makeD1DogViz();
+  scene.add(dog);
+  loadGo2StandMesh(function(g){
+    if(!Map3D.scene)return;
+    if(Map3D.dog) Map3D.scene.remove(Map3D.dog);
+    Map3D.scene.add(g);
+    Map3D.dog=g;
+  });
+  var geo=new THREE.BufferGeometry();
+  var mat=new THREE.PointsMaterial({size:0.05, vertexColors:true, sizeAttenuation:true});
+  var points=new THREE.Points(geo, mat);
+  points.renderOrder=0;
+  scene.add(points);
+  Map3D={ready:true, renderer:renderer, scene:scene, camera:camera, points:points, dog:dog, grid:grid, anim:0, cloudSub:null, lastN:0, drag:false, lx:0, ly:0, yaw:0.7, pitch:0.55, dist:14, levM:levelMat()};
+  canvas.onpointerdown=function(e){Map3D.drag=true;Map3D.lx=e.clientX;Map3D.ly=e.clientY;canvas.setPointerCapture(e.pointerId)};
+  canvas.onpointerup=function(){Map3D.drag=false};
+  canvas.onpointermove=function(e){
+    if(!Map3D.drag)return;
+    var dx=e.clientX-Map3D.lx, dy=e.clientY-Map3D.ly;
+    Map3D.lx=e.clientX; Map3D.ly=e.clientY;
+    Map3D.yaw-=dx*0.005; Map3D.pitch=Math.max(0.15, Math.min(1.4, Map3D.pitch+dy*0.005));
+  };
+  canvas.onwheel=function(e){e.preventDefault(); Map3D.dist=Math.max(3, Math.min(60, Map3D.dist+e.deltaY*0.02));};
+  function loop(){
+    Map3D.anim=requestAnimationFrame(loop);
+    if(UI.route!=='map')return;
+    if(MapCloud.dirty)rebuildMapPoints();
+    var d=Map3D.dog;
+    var m=Map3D.levM||levelMat();
+    var px=poseSmooth.init?poseSmooth.x:robot.x;
+    var py=poseSmooth.init?poseSmooth.y:robot.y;
+    var pz=poseSmooth.init?poseSmooth.z:(robot.z||0);
+    var qori=poseSmooth.init
+      ? {x:poseSmooth.qx,y:poseSmooth.qy,z:poseSmooth.qz,w:poseSmooth.qw}
+      : {x:robot.qx,y:robot.qy,z:robot.qz,w:robot.qw};
+    var pyaw=headingYawFromQuat(qori, m);
+    var q=mulMat3(m, px, py, pz);
+    if(d){
+      d.position.set(q[0], 0, -q[1]);
+      d.rotation.set(0, pyaw, 0);
+      if(d.userData.lidarDot) d.userData.lidarDot.position.y=Math.max(0.2, MapGnd.z);
+    }
+    var cx=q[0], cz=-q[1];
+    var cy=0.9;
+    Map3D.camera.position.set(
+      cx + Map3D.dist*Math.cos(Map3D.pitch)*Math.sin(Map3D.yaw),
+      cy + Map3D.dist*Math.sin(Map3D.pitch),
+      cz + Map3D.dist*Math.cos(Map3D.pitch)*Math.cos(Map3D.yaw)
+    );
+    Map3D.camera.lookAt(cx, 0.15, cz);
+    Map3D.renderer.render(Map3D.scene, Map3D.camera);
+  }
+  loop();
+  return true;
+}
+function resizeMap3d(){
+  if(!ensureMap3d())return;
+  var canvas=$('map3d');
+  var w=canvas.clientWidth||1, h=canvas.clientHeight||1;
+  Map3D.camera.aspect=w/h; Map3D.camera.updateProjectionMatrix();
+  Map3D.renderer.setSize(w,h,false);
+}
+function cloudBytes(msg){
+  var d=msg.data;
+  if(!d)return null;
+  if(typeof d==='string'){
+    try{
+      var bin=atob(d); var u=new Uint8Array(bin.length);
+      for(var i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);
+      return u;
+    }catch(e){return null}
+  }
+  if(d instanceof ArrayBuffer)return new Uint8Array(d);
+  if(Array.isArray(d))return new Uint8Array(d);
+  if(d.buffer)return new Uint8Array(d.buffer, d.byteOffset||0, d.byteLength||d.length);
+  return null;
+}
+function ingestCloud(msg){
+  // 只有用户点了「开始建图」且 LIO 在跑才累积，避免后台 LIO 把网页拖死
+  if(!mappingActive())return;
+  if(!Map3D.ready && !ensureMap3d())return;
+  var bytes=cloudBytes(msg); if(!bytes||!bytes.length)return;
+  var fields={}; (msg.fields||[]).forEach(function(f){fields[f.name]=f});
+  if(!fields.x||!fields.y||!fields.z)return;
+  var step=msg.point_step||16;
+  var n=msg.width*msg.height;
+  // 单帧本来就稀，尽量全收；过大再抽稀
+  var stride=n>8000?Math.ceil(n/8000):1;
+  var cap=Math.floor(n/stride)+2;
+  var xs=new Float32Array(cap), ys=new Float32Array(cap), zs=new Float32Array(cap);
+  var dv=new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  var xo=fields.x.offset, yo=fields.y.offset, zo=fields.z.offset;
+  var j=0;
+  for(var i=0;i<n;i+=stride){
+    var o=i*step;
+    if(o+zo+4>dv.byteLength)break;
+    var x=dv.getFloat32(o+xo,true);
+    var y=dv.getFloat32(o+yo,true);
+    var z=dv.getFloat32(o+zo,true);
+    if(!isFinite(x)||!isFinite(y)||!isFinite(z))continue;
+    if(Math.abs(x)>60||Math.abs(y)>60||Math.abs(z)>60)continue;
+    xs[j]=x; ys[j]=y; zs[j]=z; j++;
+  }
+  if(j<5)return;
+  MapCloud.lastFramePts=j;
+  var up=groundNormal();
+  updateGroundHeight(xs,ys,zs,j,up);
+  // 实景滚动窗口始终更新（看当前帧）；累积只在 LIO 位姿稳时叠，避免拧姿把地图糊成一团
+  var fr=new Float32Array(j*3);
+  for(var i=0;i<j;i++){fr[i*3]=xs[i];fr[i*3+1]=ys[i];fr[i*3+2]=zs[i]}
+  MapCloud.frames.push(fr);
+  while(MapCloud.frames.length>MapCloud.keep)MapCloud.frames.shift();
+  MapCloud.liveN=MapCloud.frames.reduce(function(s,f){return s+(f.length/3|0)},0);
+  if(lioQual.ok || !lioQual.last.init){
+    pushAccum(xs,ys,zs,j);
+    tryFitGroundOnce();
+  }else{
+    lioQual.skipAccum++;
+  }
+  MapCloud.dirty=true;
+  var w=$('map3dWait'); if(w)w.classList.add('hide');
+}
+function startMapVideo(){
+  var img=$('mapStream'); if(!img)return;
+  function tick(){
+    if(UI.route!=='map')return;
+    fetch(API+'/api/video/snapshot?t='+Date.now(),{cache:'no-store'}).then(function(r){return r.ok?r.blob():null}).then(function(b){
+      if(!b||UI.route!=='map')return;
+      var prev=img.dataset.blob;
+      var u=URL.createObjectURL(b);
+      img.onload=function(){ if(prev)try{URL.revokeObjectURL(prev)}catch(e){}; img.dataset.blob=u; };
+      img.src=u;
+    }).catch(function(){});
+  }
+  tick();
+  if(mapVideoTimer)clearInterval(mapVideoTimer);
+  mapVideoTimer=setInterval(tick, 120);
+}
+function stopMapVideo(){
+  if(mapVideoTimer){clearInterval(mapVideoTimer);mapVideoTimer=null}
+  var img=$('mapStream');
+  if(img){ if(img.dataset.blob)try{URL.revokeObjectURL(img.dataset.blob)}catch(e){}; img.removeAttribute('src'); }
+}
+function startMapPage(){
+  var w=$('map3dWait'); if(w){w.textContent='点「开始建图」后显示实时点云'; w.classList.remove('hide');}
+  loadLidarExtrinsic();
+  ensureMap3d(); resizeMap3d();
+  startMapVideo();
+  refreshMapStatus();
+  if(mapStatusTimer)clearInterval(mapStatusTimer);
+  mapStatusTimer=setInterval(function(){ if(UI.route==='map')refreshMapStatus(); }, 2000);
+  // 点云订阅由 syncCloudSub 按 mappingActive 控制，这里不盲目订阅
+}
+function stopMapPage(){
+  if(mapStatusTimer){clearInterval(mapStatusTimer);mapStatusTimer=null}
+  stopMapVideo();
+  if(Map3D.cloudSub && Map3D.cloudSub.unsubscribe){
+    try{Map3D.cloudSub.unsubscribe()}catch(e){}
+    Map3D.cloudSub=null;
+  }
+}
+
+/* ---- canvas map ---- */
+var cv=$('cv'), ctx=cv.getContext('2d');
+function resizeCv(){
+  var r=cv.getBoundingClientRect(); var dpr=devicePixelRatio||1;
+  cv.width=Math.floor(r.width*dpr); cv.height=Math.floor(r.height*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0); draw();
+}
+function metaNow(){return UI.route==='map'?buildMeta:navMeta}
+function dataNow(){return UI.route==='map'?buildData:navData}
+function toPix(meta,wx,wy){
+  return {x:(wx-meta.origin.position.x)/meta.resolution, y:meta.height-(wy-meta.origin.position.y)/meta.resolution};
+}
+function toWorld(clientX,clientY){
+  var meta=metaNow(); if(!meta)return null;
+  var rect=cv.getBoundingClientRect();
+  var cx=clientX-rect.left, cy=clientY-rect.top;
+  var scale=Math.min(rect.width/meta.width,rect.height/meta.height);
+  var ox=(rect.width-meta.width*scale)/2, oy=(rect.height-meta.height*scale)/2;
+  var px=(cx-ox)/scale, py=(cy-oy)/scale;
+  if(px<0||py<0||px>meta.width||py>meta.height)return null;
+  return {x:meta.origin.position.x+px*meta.resolution, y:meta.origin.position.y+(meta.height-py)*meta.resolution};
+}
+function arrow(meta,ox,oy,scale,pose,color){
+  if(!pose||pose.x==null)return;
+  var p=toPix(meta,pose.x,pose.y);
+  ctx.save(); ctx.translate(ox+p.x*scale,oy+p.y*scale); ctx.rotate(-pose.yaw);
+  ctx.strokeStyle='#fff';ctx.lineWidth=1.5; ctx.beginPath();ctx.arc(0,0,7,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle=color; ctx.beginPath();ctx.moveTo(12,0);ctx.lineTo(-7,-6);ctx.lineTo(-7,6);ctx.closePath();ctx.fill();
+  ctx.restore();
+}
+function draw(){
+  if(UI.route!=='nav'&&UI.route!=='map')return;
+  var rect=cv.getBoundingClientRect(); if(!rect.width)return;
+  var w=rect.width,h=rect.height;
+  ctx.fillStyle='#0b1018'; ctx.fillRect(0,0,w,h);
+  var meta=metaNow(), data=dataNow();
+  if(!meta||!data){
+    ctx.fillStyle='#4d92ff88'; ctx.font='15px sans-serif'; ctx.textAlign='center';
+    ctx.fillText(UI.route==='map'?'等待建图预览 /map_building…':'启动导航后显示地图',w/2,h/2); return;
+  }
+  var scale=Math.min(w/meta.width,h/meta.height);
+  var ox=(w-meta.width*scale)/2, oy=(h-meta.height*scale)/2;
+  var img=ctx.createImageData(meta.width,meta.height);
+  // 标准三色：未知灰 / 可通行白 / 障碍黑（OccupancyGrid: -1 / 0 / 100）
+  for(var i=0;i<meta.width*meta.height;i++){
+    var v=data[i], c=v<0?160:(v>=65?24:250);
+    img.data[i*4]=c;img.data[i*4+1]=c;img.data[i*4+2]=c;img.data[i*4+3]=255;
+  }
+  var tmp=document.createElement('canvas'); tmp.width=meta.width; tmp.height=meta.height;
+  tmp.getContext('2d').putImageData(img,0,0);
+  ctx.drawImage(tmp,ox,oy,meta.width*scale,meta.height*scale);
+  if(UI.route==='nav'&&path&&path.poses&&path.poses.length>1){
+    ctx.strokeStyle='#22c55e'; ctx.lineWidth=2.5; ctx.beginPath();
+    for(var j=0;j<path.poses.length;j++){
+      var q=toPix(meta,path.poses[j].pose.position.x,path.poses[j].pose.position.y);
+      if(j===0)ctx.moveTo(ox+q.x*scale,oy+q.y*scale); else ctx.lineTo(ox+q.x*scale,oy+q.y*scale);
+    }
+    ctx.stroke();
+  }
+  // 激光点云（红点）；超过 2s 无更新则半透提示，但不清空（防闪）
+  if(UI.route==='nav'&&scanPts&&scanPts.length){
+    var age=Date.now()-scanPtsTs;
+    ctx.fillStyle=age>2000?'#ef444466':'#ef4444';
+    var c=Math.cos(robot.yaw), sn=Math.sin(robot.yaw);
+    for(var si=0;si+1<scanPts.length;si+=2){
+      var wx=robot.x+scanPts[si]*c-scanPts[si+1]*sn;
+      var wy=robot.y+scanPts[si]*sn+scanPts[si+1]*c;
+      var sp=toPix(meta,wx,wy);
+      ctx.fillRect(ox+sp.x*scale-1, oy+sp.y*scale-1, 2.2, 2.2);
+    }
+  }
+  if(UI.route==='nav'){arrow(meta,ox,oy,scale,initP,'#ffb020'); arrow(meta,ox,oy,scale,goal,'#ff4d4f')}
+  arrow(meta,ox,oy,scale,robot,'#4d92ff');
+  if(drag){
+    var a=toPix(meta,drag.x,drag.y), b=toPix(meta,drag.cx,drag.cy);
+    ctx.strokeStyle='#7fc8ff'; ctx.setLineDash([6,4]); ctx.beginPath();
+    ctx.moveTo(ox+a.x*scale,oy+a.y*scale); ctx.lineTo(ox+b.x*scale,oy+b.y*scale); ctx.stroke(); ctx.setLineDash([]);
+  }
+}
+
+/* press-drag-yaw */
+cv.addEventListener('pointerdown',e=>{
+  if(UI.route!=='nav'||!armed)return;
+  var w=toWorld(e.clientX,e.clientY); if(!w)return;
+  e.preventDefault(); drag={mode:armed,x:w.x,y:w.y,cx:w.x,cy:w.y}; cv.setPointerCapture(e.pointerId); draw();
+});
+cv.addEventListener('pointermove',e=>{
+  if(!drag)return; var w=toWorld(e.clientX,e.clientY); if(!w)return; drag.cx=w.x;drag.cy=w.y; draw();
+});
+cv.addEventListener('pointerup',()=>{
+  if(!drag)return;
+  var dx=drag.cx-drag.x, dy=drag.cy-drag.y;
+  var yaw=(Math.hypot(dx,dy)>0.12)?Math.atan2(dy,dx):robot.yaw;
+  var mode=drag.mode,x=drag.x,y=drag.y; drag=null; armed=''; $('cv').classList.remove('cross');
+  if(mode==='init'){
+    initP={x:x,y:y,yaw:yaw};
+    locReady=false;  // 等附近精修贴墙后再标已对齐
+    pub('/web/init_pose','geometry_msgs/Twist',{linear:{x:x,y:y,z:0},angular:{x:0,y:0,z:yaw}});
+    toast('初值已下发，正在附近平移+旋转贴墙（不必很准）…','ok');
+    // 精修由 auto_relocalize 订阅 /initialpose 触发；轮询结果
+    setTimeout(function(){ pollRelocHint(); }, 1500);
+    setTimeout(function(){ pollRelocHint(); }, 4000);
+  }else{
+    goal={x:x,y:y,yaw:yaw};
+    if(!locReady&&initP.x==null){
+      toast('已预标记目标，但定位未就绪 — 等重定位/设姿后再点「设目标」下发','err');
+    }else{
+      pub('/web/nav_cmd','geometry_msgs/Twist',{linear:{x:x,y:y,z:0},angular:{x:0,y:0,z:yaw}});
+      toast('目标已下发','ok');
+    }
+  }
+  highlightNext();updateHint();renderSide();draw();
+});
+
+/* ---- dual joysticks: move + turn ---- */
+function sendVel(){
+  if(!connected)return;
+  if(lockMode){vel={vx:0,vy:0,wz:0}}
+  if(inplaceMode){vel.vx=0;vel.vy=0}
+  if(!velPub)velPub=new ROSLIB.Topic({ros:ros,name:'/cmd_vel',messageType:'geometry_msgs/Twist'});
+  velPub.publish({linear:{x:vel.vx,y:vel.vy,z:0},angular:{x:0,y:0,z:vel.wz}});
+}
+function bindJoy(pad,knob,kind){
+  if(!pad||!knob)return;
+  var down=false;
+  function move(cx,cy){
+    if(lockMode)return;
+    var r=pad.getBoundingClientRect();
+    var dx=(cx-r.left-r.width/2)/(r.width/2);
+    var dy=(cy-r.top-r.height/2)/(r.height/2);
+    var mag=Math.hypot(dx,dy); if(mag>1){dx/=mag;dy/=mag}
+    if(kind==='turn'){
+      dy=0; dx=clamp(dx,-1,1);
+      knob.style.left=(50+dx*42)+'%'; knob.style.top='50%';
+      vel.wz=-dx*WZ;
+    }else{
+      if(inplaceMode){dx=0;dy=0}
+      knob.style.left=(50+dx*42)+'%'; knob.style.top=(50+dy*42)+'%';
+      vel.vx=-dy*VX; vel.vy=-dx*VY; // 右拨 = 右移（ROS +y 向左，故取反）
+    }
+    knob.style.transform='translate(-50%,-50%)';
+    sendVel();
+  }
+  function end(){
+    if(!down)return; down=false;
+    knob.style.left='50%'; knob.style.top='50%'; knob.style.transform='translate(-50%,-50%)';
+    if(kind==='turn')vel.wz=0; else {vel.vx=0;vel.vy=0}
+    sendVel();
+  }
+  pad.addEventListener('pointerdown',e=>{down=true;pad.setPointerCapture(e.pointerId);move(e.clientX,e.clientY)});
+  pad.addEventListener('pointermove',e=>{if(down)move(e.clientX,e.clientY)});
+  pad.addEventListener('pointerup',end);
+  pad.addEventListener('pointercancel',end);
+}
+bindJoy($('joyMove'),$('knobMove'),'move');
+bindJoy($('joyTurn'),$('knobTurn'),'turn');
+bindJoy($('mcJoyMove'),$('mcKnobMove'),'move');
+bindJoy($('mcJoyTurn'),$('mcKnobTurn'),'turn');
+
+// 100ms retransmit while held (like v2)
+setInterval(()=>{ if(vel.vx||vel.vy||vel.wz) sendVel(); },100);
+
+var keys={};
+window.addEventListener('keydown',e=>{
+  if(UI.route==='motion'||UI.route==='nav'||UI.route==='map'){
+    if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key))e.preventDefault();
+  }
+  keys[e.key.toLowerCase()]=true; keyVel();
+});
+window.addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false; keyVel()});
+function keyVel(){
+  if(lockMode){vel={vx:0,vy:0,wz:0};sendVel();return}
+  vel.vx=0;vel.vy=0;vel.wz=0;
+  if(keys['w']||keys['arrowup'])vel.vx=VX;
+  if(keys['s']||keys['arrowdown'])vel.vx=-VX;
+  if(keys['a'])vel.vy=VY;
+  if(keys['d'])vel.vy=-VY;
+  if(keys['arrowleft']||keys['q'])vel.wz=WZ;
+  if(keys['arrowright']||keys['e'])vel.wz=-WZ;
+  if(inplaceMode){vel.vx=0;vel.vy=0}
+  sendVel();
+}
+function estopSilent(){
+  vel={vx:0,vy:0,wz:0};
+  if(connected) for(var i=0;i<3;i++)sendVel();
+}
+function estop(){
+  estopSilent();
+  pub('/web/nav_cancel','std_msgs/Empty',{});
+  toast('急停','err');
+}
+$('estopTop').onclick=()=>{estop(); if(S.nav2) pub('/web/stop_nav2','std_msgs/Empty',{})};
+if($('estopFloat'))$('estopFloat').onclick=$('estopTop').onclick;
+
+/* ---- maps / settings ---- */
+function refreshMaps(){
+  httpGet(API+'/api/maps',r=>{
+    var maps=r.maps||[];
+    var list=$('mapsList'); list.innerHTML='';
+    $('mapsCount').textContent=maps.length;
+    $('sbMaps').textContent=maps.length+' 张';
+    var empty=$('mapsEmpty'); if(empty)empty.style.display=maps.length?'none':'block';
+    maps.forEach(m=>{
+      var isSel=UI.selMap===m.name;
+      var row=document.createElement('div');
+      row.className='maprow'+(isSel?' sel':'')+(freshMap===m.name?' fresh':'');
+      var badge=isSel?'<span class="navbadge">导航地图</span>':'';
+      row.innerHTML='<img src="'+API+'/api/map/preview?name='+encodeURIComponent(m.name)+'&t='+Date.now()+'">'+
+        '<div class="mi"><b>'+m.name+badge+'</b><small>'+m.width+'×'+m.height+' · '+m.mtime+' · '+(m.resolution||0.05)+'m/格</small></div>'+
+        '<div class="acts">'+
+          '<button class="action'+(isSel?' ok':'')+'" data-a="nav">'+(isSel?'当前导航':'设为导航地图')+'</button>'+
+          '<button class="action" data-a="edit">编辑</button>'+
+          '<button class="action danger" data-a="del">删除</button>'+
+        '</div>';
+      row.querySelector('[data-a=nav]').onclick=ev=>{ev.stopPropagation();setNavMap(m.name)};
+      row.querySelector('[data-a=edit]').onclick=ev=>{ev.stopPropagation();edRequest(m.name)};
+      row.querySelector('[data-a=del]').onclick=ev=>{
+        ev.stopPropagation();
+        if(!confirm('删除 '+m.name+'？'))return;
+        httpPost(API+'/api/map/delete',{name:m.name},()=>{
+          if(UI.selMap===m.name){UI.selMap='';localStorage.removeItem('dog_selMap')}
+          toast('已删除','ok');refreshMaps();refreshMapSelect();
+        });
+      };
+      row.onclick=()=>setNavMap(m.name);
+      list.appendChild(row);
+    });
+    if(freshMap){setTimeout(function(){freshMap='';},2800)}
+  });
+}
+document.querySelectorAll('[data-act]').forEach(btn=>{
+  btn.onclick=()=>callBridge(btn.dataset.act);
+});
+$('btnSaveHost').onclick=()=>{
+  host=$('hostIp').value.trim()||DEFAULT_HOST;
+  apiPort=$('apiPort').value.trim()||'8090';
+  rosUrl=$('rosUrl').value.trim()||('ws://'+host+':9090');
+  videoUrl=($('videoUrl')&&$('videoUrl').value.trim())||'';
+  localStorage.setItem('dog_host',host);
+  localStorage.setItem('dog_api_port',apiPort);
+  localStorage.setItem('dog_ros_url',rosUrl);
+  localStorage.setItem('dog_video_url',videoUrl);
+  API='http://'+host+':'+apiPort;
+  toast('已保存，重连中…','ok'); connect();
+  if(UI.route==='motion')loadMotionVideo(true);
+};
+$('btnRebootRos').onclick=()=>{
+  httpPost(API+'/api/restart_rosbridge',{},r=>{toast(r.ok?'已重启':'失败',r.ok?'ok':'err');setTimeout(connect,2500)});
+};
+function refreshSys(){
+  httpGet(API+'/api/sysinfo',r=>{
+    setApiWarn(false);
+    if(r.load)$('sysLoad').textContent=r.load;
+    if(r.mem)$('sysMem').textContent=r.mem;
+    if(r.net)$('sysNet').textContent=r.net;
+    if(r.uptime)$('tUptime').textContent=r.uptime;
+    if(r.cpu_pct!=null){
+      $('tCpu').textContent=r.cpu_pct.toFixed(1)+'%';
+      setBar('barCpu',r.cpu_pct,'tileCpu');
+    }
+    if(r.mem_pct!=null){
+      $('tMem').textContent=r.mem_pct.toFixed(1)+'%';
+      setBar('barMem',r.mem_pct,'tileMem');
+    }
+    if(r.disk_pct!=null){
+      $('tDisk').textContent=r.disk_pct.toFixed(1)+'%';
+      setBar('barDisk',r.disk_pct,'tileDisk');
+    }
+    if(r.ctrl)setCtrlLabel(r.ctrl);
+    else if(r.services) setCtrlLabel(r.services.bridge?'SDK':'APP');
+    if(r.services){Object.assign(S,r.services);renderChips();setConn(connected);setCtrlLabel(S.bridge?'SDK':'APP')}
+  },()=>{setApiWarn(true)});
+}
+var apiWarnShown=false;
+function setApiWarn(down){
+  var el=$('apiWarn'); if(el)el.style.display=down?'block':'none';
+  if(down&&!apiWarnShown){apiWarnShown=true;toast('API :8090 未连接（地图/系统信息不可用）','err')}
+  if(!down)apiWarnShown=false;
+}
+
+/* clock */
+setInterval(()=>{
+  var n=new Date(),p=x=>String(x).padStart(2,'0');
+  $('hTime').textContent=p(n.getHours())+':'+p(n.getMinutes())+':'+p(n.getSeconds());
+  $('hDate').textContent=(n.getMonth()+1)+'月'+n.getDate()+'日 周'+'日一二三四五六'[n.getDay()];
+},1000);
+
+window.addEventListener('resize',()=>{
+  if(UI.route==='nav')resizeCv();
+  if(UI.route==='map')resizeMap3d();
+  if(UI.route==='edit')edResize();
+});
+connect();
+
+/* ============ 地图编辑器 (参考 v2.html) ============ */
+var MATC=[128,255,0];
+var MATN=['未知','可通行','障碍'];
+var MAT_PGM=[205,254,0]; // ROS: unknown/free/occ
+var ED={open:false,name:'',pending:'',w:0,h:0,res:0.05,ox:0,oy:0,
+  cells:null,img:null,off:null,octx:null,ctx:null,vw:1,vh:1,
+  view:{tx:0,ty:0,s:1},
+  tool:'brush',mat:2,size:5,pan:false,grid:true,
+  undo:[],redo:[],dirty:false,
+  snap:null,sbox:null,fbox:{x0:1e9,y0:1e9,x1:-1,y1:-1},
+  drag:null,g:null,pen:false,hover:null};
+
+function bindTip(el,text){
+  el.dataset.tip=text;
+  if(el._tipBound)return;
+  el._tipBound=true;
+  var timer=null;
+  var show=function(){var t=$('tip');if(!t)return;t.textContent=el.dataset.tip;t.classList.add('show');
+    var r=el.getBoundingClientRect();
+    t.style.left='';t.style.right=(innerWidth-r.left+8)+'px';
+    t.style.top=(r.top+r.height/2-14)+'px';};
+  var hide=function(){var t=$('tip');if(t)t.classList.remove('show')};
+  el.addEventListener('mouseenter',show);el.addEventListener('mouseleave',hide);
+  el.addEventListener('touchstart',function(){timer=setTimeout(show,380)},{passive:true});
+  el.addEventListener('touchend',function(){clearTimeout(timer);hide()});
+  el.addEventListener('touchmove',function(){clearTimeout(timer)});
+}
+
+function parsePgm(buf){
+  var u8=new Uint8Array(buf);
+  var i=0,n=u8.length;
+  function isWs(c){return c===9||c===10||c===13||c===32}
+  function readTok(){
+    while(i<n){
+      if(u8[i]===35){while(i<n&&u8[i]!==10)i++;continue}
+      if(isWs(u8[i])){i++;continue}
+      break;
+    }
+    var s='';
+    while(i<n&&!isWs(u8[i])&&u8[i]!==35){s+=String.fromCharCode(u8[i++])}
+    return s;
+  }
+  var magic=readTok();
+  if(magic!=='P5')throw new Error('仅支持 P5 PGM');
+  var w=+readTok(),h=+readTok(),maxv=+readTok();
+  if(!(w>0&&h>0))throw new Error('无效尺寸');
+  while(i<n&&isWs(u8[i]))i++;
+  var pixels=u8.subarray(i,i+w*h);
+  if(pixels.length<w*h)throw new Error('像素不足');
+  return {w:w,h:h,maxv:maxv||255,pixels:pixels};
+}
+
+function edRequest(name){
+  ED.pending=name;
+  toast('正在载入 '+name+' …');
+  Promise.all([
+    fetch(API+'/api/map/pgm?name='+encodeURIComponent(name))
+      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.arrayBuffer()})
+      .then(parsePgm),
+    fetch(API+'/api/maps').then(function(r){return r.json()}).catch(function(){return {maps:[]}})
+  ]).then(function(pair){
+    var pgm=pair[0], r=pair[1];
+    var meta={name:name,res:0.05,ox:0,oy:0};
+    (r.maps||[]).forEach(function(m){
+      if(m.name===name){
+        meta.res=m.resolution||0.05;
+        meta.ox=(m.origin&&m.origin[0])||0;
+        meta.oy=(m.origin&&m.origin[1])||0;
+      }
+    });
+    edOpenFromPgm(meta,pgm);
+  }).catch(function(e){toast('载入失败: '+(e.message||e),'err')});
+}
+
+function edOpenFromPgm(meta,pgm){
+  ED.w=pgm.w;ED.h=pgm.h;ED.res=meta.res||0.05;
+  ED.ox=meta.ox||0;ED.oy=meta.oy||0;
+  ED.name=meta.name||ED.pending||'';
+  var off=document.createElement('canvas');
+  off.width=ED.w;off.height=ED.h;
+  var octx=off.getContext('2d',{willReadFrequently:true});
+  octx.imageSmoothingEnabled=false;
+  ED.off=off;ED.octx=octx;
+  ED.img=octx.createImageData(ED.w,ED.h);
+  var d=ED.img.data,n=ED.w*ED.h;
+  ED.cells=new Uint8Array(n);
+  for(var i=0;i<n;i++){
+    var g=pgm.pixels[i];
+    // ROS PGM: 254=自由, 0=障碍, 205=未知。阈值须避开 205（v2 是先归一成 128 再用 >200）
+    var v=g>=250?1:(g<=50?2:0);
+    ED.cells[i]=v;
+    var c=MATC[v],o=i<<2;
+    d[o]=d[o+1]=d[o+2]=c;d[o+3]=255;
+  }
+  octx.putImageData(ED.img,0,0);
+  ED.undo=[];ED.redo=[];ED.dirty=false;ED.snap=null;ED.sbox=null;ED.drag=null;ED.g=null;
+  ED.fbox={x0:1e9,y0:1e9,x1:-1,y1:-1};
+  ED.open=true;
+  go('edit');
+  edRenderTools();edResize();edFit();
+  if(localStorage.getItem('edges1')!=='1'&&$('edHint'))$('edHint').classList.add('show');
+  toast('已打开 '+ED.name,'ok');
+}
+function edReload(){
+  if(ED.dirty&&!confirm('放弃当前所有修改, 重新载入原图?'))return;
+  edRequest(ED.name);
+}
+function edResize(){
+  var cv=$('edCv');if(!cv)return;
+  var r=cv.getBoundingClientRect();
+  ED.vw=Math.max(2,Math.round(r.width||cv.clientWidth||innerWidth));
+  ED.vh=Math.max(2,Math.round(r.height||cv.clientHeight||(innerHeight-54)));
+  cv.width=ED.vw*DPR;cv.height=ED.vh*DPR;
+  ED.ctx=cv.getContext('2d');
+  edDraw();
+}
+function edMinScale(){return Math.min(ED.vw/ED.w,ED.vh/ED.h)*0.4}
+function edFit(){
+  if(!ED.w)return;
+  var s=Math.min(ED.vw/ED.w,ED.vh/ED.h)*0.92;
+  ED.view={s:s,tx:(ED.vw-ED.w*s)/2,ty:(ED.vh-ED.h*s)/2};
+  edDraw();edSyncTools();
+}
+function edZoom(f,cx,cy){
+  var s=Math.max(edMinScale(),Math.min(80,ED.view.s*f)),k=s/ED.view.s;
+  ED.view.tx=cx-(cx-ED.view.tx)*k;
+  ED.view.ty=cy-(cy-ED.view.ty)*k;
+  ED.view.s=s;
+}
+function edZoomUI(f,cx,cy){edZoom(f,cx,cy);edDraw();edSyncTools()}
+
+function edDraw(){
+  var c=ED.ctx;if(!c||!ED.off)return;
+  var tx=ED.view.tx,ty=ED.view.ty,s=ED.view.s,W=ED.vw,H=ED.vh;
+  c.setTransform(DPR,0,0,DPR,0,0);
+  c.clearRect(0,0,W,H);
+  c.imageSmoothingEnabled=false;
+  c.drawImage(ED.off,tx,ty,ED.w*s,ED.h*s);
+  c.strokeStyle='#7f8ca066';c.lineWidth=1;
+  c.strokeRect(tx-.5,ty-.5,ED.w*s+1,ED.h*s+1);
+  var L=Math.max(tx,0),R=Math.min(tx+ED.w*s,W),T=Math.max(ty,0),B=Math.min(ty+ED.h*s,H);
+  var x,y,p;
+  if(ED.grid&&s>=9){
+    var x0=Math.max(0,Math.floor(-tx/s)),x1=Math.min(ED.w,Math.ceil((W-tx)/s));
+    var y0=Math.max(0,Math.floor(-ty/s)),y1=Math.min(ED.h,Math.ceil((H-ty)/s));
+    c.beginPath();c.strokeStyle='#7f8ca047';
+    for(x=x0;x<=x1;x++){p=Math.round(tx+x*s)+.5;c.moveTo(p,T);c.lineTo(p,B)}
+    for(y=y0;y<=y1;y++){p=Math.round(ty+y*s)+.5;c.moveTo(L,p);c.lineTo(R,p)}
+    c.stroke();
+  }
+  var m=Math.max(1,Math.round(1/ED.res));
+  if(ED.grid&&s*m>=22){
+    var x0m=Math.max(0,Math.floor(-tx/s/m)*m),y0m=Math.max(0,Math.floor(-ty/s/m)*m);
+    c.beginPath();c.strokeStyle='#7f8ca066';
+    for(x=x0m;x<=ED.w;x+=m){p=Math.round(tx+x*s)+.5;if(p>=-1&&p<=W+1){c.moveTo(p,T);c.lineTo(p,B)}}
+    for(y=y0m;y<=ED.h;y+=m){p=Math.round(ty+y*s)+.5;if(p>=-1&&p<=H+1){c.moveTo(L,p);c.lineTo(R,p)}}
+    c.stroke();
+  }
+  var d=ED.drag;
+  if(d&&!d.pan&&(ED.tool==='line'||ED.tool==='rect')){
+    c.save();c.strokeStyle=ED.mat===2?'#ec4b4b':(ED.mat===1?'#17b978':'#f5a524');
+    c.lineWidth=2;c.setLineDash([6,4]);
+    if(ED.tool==='rect'){
+      var a=Math.min(d.x0,d.x),b=Math.min(d.y0,d.y);
+      c.strokeRect(tx+a*s,ty+b*s,(Math.abs(d.x-d.x0)+1)*s,(Math.abs(d.y-d.y0)+1)*s);
+    }else{
+      c.beginPath();c.moveTo(tx+(d.x0+.5)*s,ty+(d.y0+.5)*s);
+      c.lineTo(tx+(d.x+.5)*s,ty+(d.y+.5)*s);c.stroke();
+    }
+    c.restore();
+  }
+  if(ED.hover&&!ED.pan&&ED.tool!=='fill'&&s>=3){
+    var hx=ED.hover[0],hy=ED.hover[1],rr=ED.size*s/2;
+    c.save();c.strokeStyle='#4d92ffcc';c.lineWidth=1.5;
+    c.beginPath();c.arc(tx+(hx+.5)*s,ty+(hy+.5)*s,Math.max(3,rr),0,7);c.stroke();c.restore();
+  }
+}
+
+function edMark(x,y){
+  var f=ED.fbox;
+  if(x<f.x0)f.x0=x;if(x>f.x1)f.x1=x;if(y<f.y0)f.y0=y;if(y>f.y1)f.y1=y;
+  var b=ED.sbox;
+  if(b){if(x<b.x0)b.x0=x;if(x>b.x1)b.x1=x;if(y<b.y0)b.y0=y;if(y>b.y1)b.y1=y}
+}
+function edSet(x,y,v){
+  if(x<0||y<0||x>=ED.w||y>=ED.h)return;
+  var i=y*ED.w+x;if(ED.cells[i]===v)return;
+  ED.cells[i]=v;
+  var d=ED.img.data,o=i<<2,g=MATC[v];
+  d[o]=d[o+1]=d[o+2]=g;d[o+3]=255;
+  edMark(x,y);
+}
+function edFlush(){
+  var b=ED.fbox;if(b.x1<b.x0)return;
+  ED.octx.putImageData(ED.img,0,0,b.x0,b.y0,b.x1-b.x0+1,b.y1-b.y0+1);
+  ED.fbox={x0:1e9,y0:1e9,x1:-1,y1:-1};
+}
+function edStamp(cx,cy,v){
+  var r=(ED.size-1)>>1;
+  if(r<=0){edSet(cx,cy,v);return}
+  for(var dy=-r;dy<=r;dy++){
+    var dx=Math.floor(Math.sqrt(r*r-dy*dy+0.25));
+    for(var x=cx-dx;x<=cx+dx;x++)edSet(x,cy+dy,v);
+  }
+}
+function edSeg(x0,y0,x1,y1,v){
+  var n=Math.max(Math.abs(x1-x0),Math.abs(y1-y0));
+  if(!n){edStamp(x0,y0,v);return}
+  for(var i=0;i<=n;i++)
+    edStamp(Math.round(x0+(x1-x0)*i/n),Math.round(y0+(y1-y0)*i/n),v);
+}
+function edRectFill(x0,y0,x1,y1,v){
+  var a=Math.min(x0,x1),b=Math.max(x0,x1),p=Math.min(y0,y1),q=Math.max(y0,y1);
+  for(var y=p;y<=q;y++)for(var x=a;x<=b;x++)edSet(x,y,v);
+}
+function edFill(sx,sy,v){
+  if(sx<0||sy<0||sx>=ED.w||sy>=ED.h)return;
+  var from=ED.cells[sy*ED.w+sx];
+  if(from===v)return;
+  var st=[sx,sy];
+  while(st.length){
+    var y=st.pop(),x=st.pop(),row=y*ED.w;
+    if(ED.cells[row+x]!==from)continue;
+    var a=x;while(a>0&&ED.cells[row+a-1]===from)a--;
+    var b=x;while(b<ED.w-1&&ED.cells[row+b+1]===from)b++;
+    for(var k=a;k<=b;k++){
+      edSet(k,y,v);
+      if(y>0&&ED.cells[row-ED.w+k]===from)st.push(k,y-1);
+      if(y<ED.h-1&&ED.cells[row+ED.w+k]===from)st.push(k,y+1);
+    }
+  }
+}
+function edBegin(){ED.snap=ED.cells.slice();ED.sbox={x0:1e9,y0:1e9,x1:-1,y1:-1}}
+function edCommit(){
+  if(!ED.snap)return;
+  var b=ED.sbox;ED.sbox=null;
+  if(b.x1<b.x0){ED.snap=null;return}
+  var x=b.x0,y=b.y0,w=b.x1-x+1,h=b.y1-y+1;
+  var before=new Uint8Array(w*h),after=new Uint8Array(w*h);
+  for(var j=0;j<h;j++){
+    var s0=(y+j)*ED.w+x,d0=j*w;
+    for(var i=0;i<w;i++){before[d0+i]=ED.snap[s0+i];after[d0+i]=ED.cells[s0+i]}
+  }
+  ED.undo.push({x:x,y:y,w:w,h:h,before:before,after:after});
+  if(ED.undo.length>80)ED.undo.shift();
+  ED.redo.length=0;ED.snap=null;ED.dirty=true;
+  edSyncTools();
+}
+function edRevert(){
+  if(!ED.snap)return;
+  var b=ED.sbox;
+  if(b&&b.x1>=b.x0){
+    for(var y=b.y0;y<=b.y1;y++)for(var x=b.x0;x<=b.x1;x++)edSet(x,y,ED.snap[y*ED.w+x]);
+    edFlush();
+  }
+  ED.snap=null;ED.sbox=null;
+}
+function edPatch(p,key){
+  var src=p[key];
+  for(var j=0;j<p.h;j++){
+    var s0=j*p.w,d0=(p.y+j)*ED.w+p.x;
+    for(var i=0;i<p.w;i++){
+      var v=src[s0+i],idx=d0+i;
+      ED.cells[idx]=v;
+      var o=idx<<2,g=MATC[v],d=ED.img.data;
+      d[o]=d[o+1]=d[o+2]=g;d[o+3]=255;
+    }
+  }
+  ED.octx.putImageData(ED.img,0,0,p.x,p.y,p.w,p.h);
+  ED.dirty=true;edDraw();edSyncTools();
+}
+function edUndo(){
+  var p=ED.undo.pop();
+  if(!p){toast('没有可撤销的了');return}
+  ED.redo.push(p);edPatch(p,'before');
+}
+function edRedo(){
+  var p=ED.redo.pop();
+  if(!p){toast('没有可重做的了');return}
+  ED.undo.push(p);edPatch(p,'after');
+}
+
+function cellsToPgmB64(){
+  var head='P5\n'+ED.w+' '+ED.h+'\n255\n';
+  var headB=new TextEncoder().encode(head);
+  var pix=new Uint8Array(ED.w*ED.h);
+  for(var i=0;i<pix.length;i++)pix[i]=MAT_PGM[ED.cells[i]];
+  var out=new Uint8Array(headB.length+pix.length);
+  out.set(headB,0);out.set(pix,headB.length);
+  var bin='';
+  for(var j=0;j<out.length;j++)bin+=String.fromCharCode(out[j]);
+  return btoa(bin);
+}
+function edSave(asNew){
+  if(!ED.open||!ED.name){toast('没有打开的地图','err');return}
+  var target=ED.name;
+  if(asNew){
+    var v=prompt('另存为新地图(英文/数字/下划线/减号):',ED.name.replace(/\.pgm$/,'')+'_edit');
+    if(v===null)return;
+    target=v.trim().replace(/\.pgm$/,'');
+    if(!/^[\w\-]{1,64}$/.test(target)){toast('地图名不合法','err');return}
+    target+='.pgm';
+  }else if(!confirm('覆盖保存到 "'+ED.name+'" ?'))return;
+  if(!target.endsWith('.pgm'))target+='.pgm';
+  toast('正在保存…');
+  httpPost(API+'/api/map/edit',{
+    name:target,
+    data:cellsToPgmB64(),
+    resolution:ED.res,
+    origin:[ED.ox,ED.oy]
+  },function(r){
+    if(r&&r.ok){
+      ED.dirty=false;ED.name=r.name||target;edSyncTools();
+      freshMap=ED.name;UI.selMap=ED.name;localStorage.setItem('dog_selMap',ED.name);
+      toast('地图已保存：'+ED.name,'ok');
+      setTimeout(function(){go('maps')},400);
+    }else toast('保存失败: '+((r&&r.error)||''),'err');
+  },function(){toast('保存失败','err')});
+}
+
+var ED_TOOLS=[
+  ['i-brush','画笔',function(){edSetTool('brush')},'brush'],
+  ['i-line','直线',function(){edSetTool('line')},'line'],
+  ['i-rect','矩形',function(){edSetTool('rect')},'rect'],
+  ['i-fill','油漆桶',function(){edSetTool('fill')},'fill'],
+  null,
+  ['i-undo','撤销',function(){edUndo()},'undo'],
+  ['i-redo','重做',function(){edRedo()},'redo'],
+  null,
+  ['i-hand','单指:画/平移',function(){ED.pan=!ED.pan;edSyncTools();edDraw()},'pan'],
+  ['i-grid','栅格线',function(){ED.grid=!ED.grid;edDraw();edSyncTools()},'grid'],
+  ['i-fit','适应窗口',function(){edFit()}],
+  ['i-plus','放大',function(){edZoomUI(1.5,ED.vw/2,ED.vh/2)}],
+  ['i-minus','缩小',function(){edZoomUI(1/1.5,ED.vw/2,ED.vh/2)}]
+];
+function edSetTool(t){ED.tool=t;edSyncTools();edDraw()}
+function edRenderTools(){
+  var box=$('edTools');if(!box)return;
+  box.innerHTML='';
+  ED_TOOLS.forEach(function(it){
+    if(!it){var s=document.createElement('div');s.className='sep';box.append(s);return}
+    var b=document.createElement('button');
+    b.className='tool';
+    b.innerHTML='<svg class="ic"><use href="#'+it[0]+'"/></svg>';
+    if(it[3])b.dataset.flag=it[3];
+    b.onclick=it[2];bindTip(b,it[1]);
+    box.append(b);
+  });
+  if($('edSize'))$('edSize').oninput=function(e){ED.size=+e.target.value;edSyncTools();edDraw()};
+  document.querySelectorAll('#edBar .mat').forEach(function(el){
+    el.onclick=function(){ED.mat=+el.dataset.m;edSyncTools();edDraw()};
+  });
+  if($('edDoSave'))$('edDoSave').onclick=function(){edSave(false)};
+  if($('edDoSaveAs'))$('edDoSaveAs').onclick=function(){edSave(true)};
+  if($('edDoReload'))$('edDoReload').onclick=function(){edReload()};
+  if($('edHintOk'))$('edHintOk').onclick=function(){localStorage.setItem('edges1','1');$('edHint').classList.remove('show')};
+  edSyncTools();
+}
+function edSyncTools(){
+  var box=$('edTools');if(!box)return;
+  function on(f,v){var b=box.querySelector('[data-flag='+f+']');if(b)b.classList.toggle('on',!!v)}
+  on('brush',ED.tool==='brush');on('line',ED.tool==='line');
+  on('rect',ED.tool==='rect');on('fill',ED.tool==='fill');
+  on('pan',ED.pan);on('grid',ED.grid);
+  function dim(f,v){var b=box.querySelector('[data-flag='+f+']');if(b)b.style.opacity=v?1:.35}
+  dim('undo',ED.undo.length);dim('redo',ED.redo.length);
+  var ph=box.querySelector('[data-flag=pan]');
+  if(ph){ph.innerHTML='<svg class="ic"><use href="#'+(ED.pan?'i-hand':'i-brush')+'"/></svg>';
+    bindTip(ph,ED.pan?'单指=平移':'单指=画')}
+  document.querySelectorAll('#edBar .mat').forEach(function(el){
+    el.classList.toggle('on',+el.dataset.m===ED.mat)});
+  if($('edSize'))$('edSize').value=ED.size;
+  if($('edSizeV'))$('edSizeV').textContent=ED.size+'格·'+(ED.size*ED.res*100).toFixed(0)+'cm';
+  if($('edNameT'))$('edNameT').textContent=ED.name||'';
+  if($('edNameS'))$('edNameS').textContent=ED.w+'×'+ED.h+' · '+ED.res+'m/格'
+    +(ED.dirty?' · 未保存':'')+' · '+MATN[ED.mat];
+  if($('edName'))$('edName').classList.toggle('dirty',ED.dirty);
+  edStatus();
+}
+function edStatus(){
+  var z=$('edZoom');if(!z)return;
+  z.textContent=ED.view.s.toFixed(1)+' px/格';
+  var h=ED.hover;
+  if($('edPos'))$('edPos').textContent=(h&&h[0]>=0&&h[0]<ED.w&&h[1]>=0&&h[1]<ED.h)
+    ? '('+(ED.ox+h[0]*ED.res).toFixed(2)+', '+(ED.oy+(ED.h-1-h[1])*ED.res).toFixed(2)+')m' : '';
+}
+
+addEventListener('keydown',function(e){
+  if(UI.route!=='edit'||!(e.ctrlKey||e.metaKey))return;
+  var k=e.key.toLowerCase();
+  if(k==='z'){e.preventDefault();e.shiftKey?edRedo():edUndo()}
+  else if(k==='y'){e.preventDefault();edRedo()}
+  else if(k==='s'){e.preventDefault();edSave(false)}
+});
+
+(function(){
+  var cv=$('edCv');if(!cv)return;
+  function pos(e){var r=cv.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]}
+  function cell(sx,sy){return [Math.floor((sx-ED.view.tx)/ED.view.s),Math.floor((sy-ED.view.ty)/ED.view.s)]}
+  cv.addEventListener('pointerdown',function(e){
+    if(!ED.open||ED.g)return;
+    if(e.pointerType==='touch'&&ED.pen)return;
+    if(e.pointerType==='pen')ED.pen=true;
+    try{cv.setPointerCapture(e.pointerId)}catch(_){}
+    var xy=pos(e),sx=xy[0],sy=xy[1];
+    if(e.pointerType!=='pen'&&(ED.pan||e.button===1||e.button===2)){
+      ED.drag={pan:true,sx:sx,sy:sy};return}
+    var cxy=cell(sx,sy),cx=cxy[0],cy=cxy[1];
+    ED.drag={pan:false,x0:cx,y0:cy,x:cx,y:cy};
+    if(ED.tool==='brush'){edBegin();edStamp(cx,cy,ED.mat);edFlush()}
+    else if(ED.tool==='fill'){edBegin();edFill(cx,cy,ED.mat);edFlush();edCommit();ED.drag=null}
+    edDraw();
+  });
+  cv.addEventListener('pointermove',function(e){
+    if(!ED.open)return;
+    var xy=pos(e),sx=xy[0],sy=xy[1];
+    ED.hover=cell(sx,sy);
+    if(ED.g||!ED.drag){edStatus();if(!ED.g&&ED.view.s>=3)edDraw();return}
+    if(ED.drag.pan){
+      ED.view.tx+=sx-ED.drag.sx;ED.view.ty+=sy-ED.drag.sy;
+      ED.drag.sx=sx;ED.drag.sy=sy;edDraw();return}
+    var cx=ED.hover[0],cy=ED.hover[1];
+    if(ED.tool==='brush'){edSeg(ED.drag.x,ED.drag.y,cx,cy,ED.mat);edFlush()}
+    ED.drag.x=cx;ED.drag.y=cy;
+    edDraw();edStatus();
+  });
+  function up(e){
+    if(e&&e.pointerType==='pen')ED.pen=false;
+    var d=ED.drag;if(!d)return;
+    ED.drag=null;
+    if(!d.pan){
+      if(ED.tool==='line'){edBegin();edSeg(d.x0,d.y0,d.x,d.y,ED.mat);edFlush();edCommit()}
+      else if(ED.tool==='rect'){edBegin();edRectFill(d.x0,d.y0,d.x,d.y,ED.mat);edFlush();edCommit()}
+      else if(ED.tool==='brush')edCommit();
+    }
+    edDraw();
+  }
+  cv.addEventListener('pointerup',up);
+  cv.addEventListener('pointercancel',function(){
+    if(ED.drag&&!ED.drag.pan)edRevert();
+    ED.drag=null;ED.pen=false;edDraw()});
+  cv.addEventListener('contextmenu',function(e){e.preventDefault()});
+  cv.addEventListener('wheel',function(e){e.preventDefault();
+    var xy=pos(e);edZoomUI(e.deltaY<0?1.18:1/1.18,xy[0],xy[1])},{passive:false});
+  cv.addEventListener('dblclick',function(e){e.preventDefault();edFit()});
+  function two(e){var a=e.touches[0],b=e.touches[1],r=cv.getBoundingClientRect();
+    return {d:Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY),
+            x:(a.clientX+b.clientX)/2-r.left,y:(a.clientY+b.clientY)/2-r.top}}
+  cv.addEventListener('touchstart',function(e){
+    if(e.touches.length<2)return;
+    e.preventDefault();
+    if(ED.drag&&!ED.drag.pan)edRevert();
+    ED.drag=null;ED.g=two(e);edDraw();
+  },{passive:false});
+  cv.addEventListener('touchmove',function(e){
+    if(e.touches.length!==2)return;
+    e.preventDefault();
+    if(!ED.g){ED.g=two(e);return}
+    var n=two(e);
+    if(ED.g.d>0)edZoom(n.d/ED.g.d,n.x,n.y);
+    ED.view.tx+=n.x-ED.g.x;ED.view.ty+=n.y-ED.g.y;
+    ED.g=n;edDraw();edStatus();
+  },{passive:false});
+  function tend(e){
+    if(e.touches.length===2){ED.g=two(e);return}
+    if(e.touches.length<2)ED.g=null;
+  }
+  cv.addEventListener('touchend',tend);
+  cv.addEventListener('touchcancel',tend);
+})();
+
+
+go('home');
+toast('左摇杆移动 · 右摇杆转向');
+})();
+</script>
+</body>
+</html>
