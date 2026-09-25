@@ -11,23 +11,20 @@ def generate_launch_description():
             name='auto_relocalize',
             output='screen',
             parameters=[{
-                # 核心：红激光大部分必须贴黑墙
-                'min_hit_ratio': 0.50,
-                'max_unk_ratio': 0.35,
-                'hit_dist': 0.25,
-                'max_beam_range': 8.0,
-                'local_radius': 5.0,
-                # 初值不必精确：附近平移 + 旋转搜索
-                'search_xy': 2.0,
-                'xy_step': 0.15,
-                'yaw_span_deg': 75.0,
-                'yaw_step_deg': 6.0,
-                'icp_max_corr': 0.55,
-                'icp_max_iter': 50,
-                'icp_fitness_max': 0.10,
+                # 导航启动后自动跑一次全局重定位, 不需要先点"设初始位姿"
+                'auto_on_startup': True,
+                'accept_score': 0.55,
+                'sigma': 0.25,               # 全局搜索似然场高斯宽度(m)
+                'coarse_step': 0.2,          # 粗搜位置步长(m)
+                'coarse_yaw_step_deg': 10.0,
+                'max_beam_range': 8.0,       # Mid360 室内有效距离, 比wheeltec的2D激光近
+                'min_clearance': 0.12,
+                'num_threads': 4,
+                # 绑架/漂移检测看门狗: 位姿匹配分连续过低时自动再触发一次全局重定位
                 'watchdog_en': True,
-                'watchdog_hit': 0.35,
-                'watchdog_count': 6,
+                'watchdog_sigma': 0.08,      # 看门狗用窄高斯严格打分
+                'watchdog_score': 0.45,
+                'watchdog_count': 3,
             }],
         ),
     ])

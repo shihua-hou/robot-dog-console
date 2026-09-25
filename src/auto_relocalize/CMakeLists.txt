@@ -13,11 +13,9 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(tf2_ros REQUIRED)
-find_package(PCL REQUIRED COMPONENTS common kdtree search registration filters)
 
+# 全局似然场搜索方案(移植自 wheeltec_fastlio), 不再需要 PCL/ICP。
 add_executable(auto_relocalize src/auto_relocalize.cpp)
-target_include_directories(auto_relocalize PRIVATE ${PCL_INCLUDE_DIRS})
-target_link_libraries(auto_relocalize ${PCL_LIBRARIES})
 ament_target_dependencies(auto_relocalize
   rclcpp nav_msgs sensor_msgs geometry_msgs std_msgs std_srvs tf2_ros)
 

@@ -190,10 +190,14 @@ def proc_pids(pattern):
                 ok = True
             if f'lib/' in cmd and pattern in cmd:
                 ok = True
-            if exe.endswith('python3') or exe.endswith('python'):
+            exe_base = os.path.basename(exe)
+            if exe_base.startswith('python3') or exe_base.startswith('python'):
                 # only if argv looks like the node, not a random script quoting the name
+                # (strip .py so script-style launches like nav_scan_node.py still match)
                 parts = cmd.split()
-                if any(p.endswith(pattern) or p.rstrip('/').endswith(pattern) for p in parts):
+                stems = [os.path.basename(p.rstrip('/')) for p in parts]
+                stems = [s[:-3] if s.endswith('.py') else s for s in stems]
+                if any(s == pattern or s.endswith(pattern) for s in stems):
                     ok = True
         if ok:
             pids.append(pid)
@@ -296,6 +300,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(stop_nav2_api())
             elif path == '/api/nav2/relocalize':
                 self._send_json(call_relocalize())
+            elif path == '/api/nav2/reloc_mode':
+                self._send_json(set_reloc_mode(body))
             elif path == '/api/nav2/reload_map':
                 self._send_json(reload_nav_map(body))
             elif path == '/api/restart_rosbridge':
@@ -762,11 +768,11 @@ def run_pcd2pgm(name, pcd_path=FASTLIO_PCD):
         '--pitch-down', str(ex.get('pitch_down', 0.7853981634)),
         '--roll', str(ex.get('roll', 0.0)),
         '--lidar-z', str(ex.get('lidar_z', 0.0) or 0.0),
-        '--z-min', '0.15', '--z-max', '1.0',
-        '--occ-min', '0.12', '--occ-pts', '4',
+        '--z-min', '0.10', '--z-max', '1.0',
+        '--occ-min', '0.12', '--occ-pts', '8',
         '--free-pts', '1', '--ground-min-z', '-0.15',
         '--free-dilate', '8', '--free-erode', '2',
-        '--despeckle', '2',
+        '--despeckle', '3',
         '--voxel', voxel,
     ]
     try:
@@ -809,6 +815,7 @@ def ensure_scan_node():
 
 _nav2_lock = threading.Lock()
 _nav2_starting = False
+_nav2_current_map = None  # 幂等启动用: 同一张图已在跑就别重新盲搜, 见 _start_nav2_impl
 
 
 _loc_heal_ts = 0.0
@@ -897,8 +904,8 @@ def call_relocalize(timeout=35.0):
         ok = 'success=True' in out or 'success=true' in out
         err = None
         if not ok:
-            if 'ICP' in out or '请设初始位姿' in out or '初值' in out:
-                err = 'ICP未对齐，请设初始位姿后自动精修'
+            if '匹配分过低' in out or '有效激光束过少' in out:
+                err = '全局重定位匹配分过低，请把狗挪到特征更多的位置，或点"设初始位姿"手动指定大致位置'
             else:
                 err = out[-300:] or 'relocalize failed'
         return {'ok': ok, 'log': out[-800:], 'error': err}
@@ -908,8 +915,33 @@ def call_relocalize(timeout=35.0):
         return {'ok': False, 'error': str(e)}
 
 
+def set_reloc_mode(body):
+    """Toggle auto_relocalize's watchdog live via ros2 param set (no nav restart).
+
+    mode='auto' -> watchdog_en:true  (持续监测，定位丢失时自动全局重定位)
+    mode='odom' -> watchdog_en:false (侧重里程计，不自动重定位；仍可手动重定位)
+    """
+    mode = 'odom' if body.get('mode') == 'odom' else 'auto'
+    if not proc_alive('auto_relocalize'):
+        return {'ok': False, 'error': 'auto_relocalize 未运行', 'mode': mode}
+    script = (
+        'source /opt/ros/humble/setup.bash && '
+        'source /home/linaro/robot_ws/install/setup.bash && '
+        'ros2 param set /auto_relocalize watchdog_en %s'
+        % ('true' if mode == 'auto' else 'false')
+    )
+    try:
+        r = subprocess.run(['bash', '-lc', script], capture_output=True, text=True, timeout=10)
+        out = (r.stdout or '') + (r.stderr or '')
+        ok = 'Set parameter successful' in out or r.returncode == 0
+        return {'ok': ok, 'mode': mode, 'log': out[-300:] if not ok else None}
+    except Exception as e:
+        return {'ok': False, 'error': str(e), 'mode': mode}
+
+
 def reload_nav_map(body):
     """Hot-reload map via map_server and optionally force relocalize."""
+    global _nav2_current_map
     m = body.get('map') or body.get('name') or ''
     m = os.path.basename(m)
     if m.endswith('.pgm'):
@@ -921,6 +953,7 @@ def reload_nav_map(body):
         return {'ok': False, 'error': f'map not found: {m}'}
     if not proc_alive('component_container_isolated'):
         return {'ok': False, 'error': 'Nav2 未运行，请先启动导航'}
+    _nav2_current_map = map_path
     # nav2_msgs/srv/LoadMap
     script = (
         'source /opt/ros/humble/setup.bash && '
@@ -949,7 +982,9 @@ def reload_nav_map(body):
 
 
 def stop_nav2_api():
+    global _nav2_current_map
     stop_nav2_procs()
+    _nav2_current_map = None
     return {'ok': True}
 
 
@@ -986,6 +1021,18 @@ def _start_nav2_impl(body):
     map_path = os.path.join(MAPS_DIR, m)
     if not os.path.isfile(map_path):
         return {'ok': False, 'error': f'map not found: {m}'}
+
+    # 幂等: 已经用同一张图跑着就别整套拆了重来 —— 全局重定位是"开盲盒"，
+    # 反复点「启动导航」会拿一次刚配准好的定位去赌一次新的盲搜，可能越点越偏。
+    global _nav2_current_map
+    if (proc_alive('component_container_isolated') and proc_alive('auto_relocalize')
+            and _nav2_current_map == map_path):
+        ensure_scan_node()
+        return {
+            'ok': True, 'map': m, 'already_running': True,
+            'hint': '导航已经在跑（同一张图），未重新盲搜；定位不对就点"手动重定位"',
+        }
+    _nav2_current_map = map_path
 
     # Singleton Nav2 — previous double-launch left two navigate_to_pose servers
     stop_nav2_procs()

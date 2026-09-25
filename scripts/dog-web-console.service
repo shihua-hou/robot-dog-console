@@ -1,0 +1,22 @@
+[Unit]
+Description=Steel-bounce dog web console (HTTP 8080 + web_ops 8090 + rosbridge 9090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=linaro
+Group=linaro
+WorkingDirectory=/home/linaro/robot_ws
+Environment=HOME=/home/linaro
+Environment=ROS_HOME=/tmp/ros_home
+Environment=PYTHONUNBUFFERED=1
+# 等 WLAN 起来；失败也继续（有线也能开页）
+ExecStartPre=/bin/sleep 8
+ExecStart=/home/linaro/robot_ws/scripts/start_web_console.sh
+ExecStop=/home/linaro/robot_ws/scripts/stop_web_console.sh
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

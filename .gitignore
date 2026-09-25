@@ -1,0 +1,28 @@
+# colcon build artifacts
+build/
+install/
+log/
+
+# python cache
+**/__pycache__/
+*.pyc
+
+# my own live-debugging backup copies (not real history, git itself keeps that)
+*.bak
+*.bak_*
+
+# FAST-LIO runtime outputs (regenerated every mapping session, huge)
+src/FAST_LIO/PCD/
+src/FAST_LIO/Log/
+*.pcd
+
+# vendored upstream driver with its own git repo -- not tracked as submodule here
+src/livox_ros_driver2/
+
+# stray old test map left in the wrong place (real maps live in maps/)
+src/nav2_tools/map.pgm
+src/nav2_tools/map.png
+src/nav2_tools/map.yaml
+
+# OS/editor noise
+.DS_Store

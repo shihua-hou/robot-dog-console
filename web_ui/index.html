@@ -865,6 +865,7 @@ var UI={route:'home',selMap:localStorage.getItem('dog_selMap')||'',activeMap:''}
 var freshMap='';
 var DPR=Math.min(2,window.devicePixelRatio||1);
 var locReady=false, relocBusy=false;
+var relocMode=localStorage.getItem('relocMode')||'auto'; // 'auto'=自动重定位看门狗 / 'odom'=里程计模式
 var S={fastlio:false,nav2:false,livox:false,bridge:false,scan:false,map_building:false,rosbridge:false,auto_relocalize:false};
 var ros=null,connected=false,subsStarted=false;
 var buildMeta=null,buildData=null,navMeta=null,navData=null;
@@ -1160,14 +1161,16 @@ function renderMenu(){
     syncMapButtons();
   }
   if(UI.route==='nav'){
+    // 顺序对应建图页(动作按钮在前，地图名在后)：启动/关闭导航 → 地图名 → 换地图
+    add('启动导航','primary',startNav,'btnStartNav');
+    add('关闭导航','danger',stopNav,'btnStopNav');
     var sel=document.createElement('select'); sel.id='mapSelect';
     sel.style.cssText='padding:7px 10px;border-radius:999px;border:1px solid var(--line);background:var(--panel2);max-width:140px';
     m.appendChild(sel);
-    add('启动导航','primary',startNav,'btnStartNav');
-    add('关闭导航','danger',stopNav,'btnStopNav');
     add('换地图','',changeNavMap,'btnSwapMap');
     refreshMapSelect();
     renderNavTools();
+    syncNavButtons();
   }else{
     var tb=$('tools'); if(tb)tb.innerHTML='';
   }
@@ -1186,13 +1189,16 @@ function renderNavTools(){
     box.appendChild(b);
     return b;
   }
+  addT('自动重定位模式','',()=>setRelocMode('auto'),'btnRelocAuto');
+  addT('里程计模式','',()=>setRelocMode('odom'),'btnRelocOdom');
   addT('设初始位姿','',()=>setArmed('init'),'btnArmInit');
-  addT('重新定位','',requestRelocalize,'btnReloc');
+  addT('手动重定位','',requestRelocalize,'btnReloc');
   addT('设目标','',()=>setArmed('goal'),'btnArmGoal');
   addT('取消目标','',()=>{
     pub('/web/nav_cancel','std_msgs/Empty',{});
     toast('已取消目标');
   },'btnCancelGoal');
+  renderRelocMode();
 }
 
 function highlightNext(){
@@ -1225,13 +1231,17 @@ function syncMapButtons(){
   if(!start||!stop||!save)return;
   var running=!!mappingSession;
   var canSave=mapPcdReady && !running && !S.nav2;
-  function setBtn(el, on, kind){
+  // 正在执行中(异步请求还没回来)一律强制置灰，不看别的状态——避免中途被
+  // 定时状态轮询按"稳态"误判重新点亮，导致按钮在请求飞行途中又能点第二下。
+  function setBtn(el, on, kind, busy, busyLabel, idleLabel){
+    if(busy){ el.disabled=true; el.className='mbtn is-off'; el.textContent=busyLabel; return; }
+    el.textContent=idleLabel;
     el.disabled=!on;
     el.className='mbtn '+(on?kind:'is-off');
   }
-  setBtn(start, !running && !S.nav2, 'primary');
-  setBtn(stop, running, 'danger');
-  setBtn(save, canSave, 'ok');
+  setBtn(start, !running && !S.nav2, 'primary', window._mapStarting, '启动中…', '开始建图');
+  setBtn(stop, running, 'danger', window._mapStopping, '停止中…', '停止建图');
+  setBtn(save, canSave, 'ok', window._mapSaving, '转换中…', '保存地图');
 }
 function mappingActive(){ return !!mappingSession; }
 function syncCloudSub(){
@@ -1292,9 +1302,9 @@ function updateHint(){
     h.textContent=!S.nav2?'选地图后点「启动导航」（会拉起定位 + 自动重定位）'
       :armed==='init'?'在地图上按住拖出车头朝向 → 松手设姿'
       :armed==='goal'?'在地图上按住拖出朝向 → 松手下发目标'
-      :relocBusy?'正在激光匹配黑障碍，请稍候…'
-      :!locReady&&initP.x==null?'自动匹配未贴墙时请「设初始位姿」，系统会在附近精修'
-      :!locReady?'已设初值，等待附近精修对齐…'
+      :relocBusy?'正在全图搜索匹配位置，请稍候…'
+      :!locReady&&initP.x==null?'正在自动重定位…若久未成功可「设初始位姿」兜底'
+      :!locReady?'已设初值，等待 AMCL 收敛…'
       :navStatus==='navigating'||navStatus==='active'?'导航中… 急停 / 取消目标可停'
       :'定位就绪后点「设目标」下发';
   }
@@ -1325,7 +1335,8 @@ function renderSide(){
       '<div>状态 <b>'+navStatus+'</b></div>'+
       '<div>地图 <b>'+(UI.activeMap||UI.selMap||'-')+'</b></div>'+
       '<div>LIO/扫描 <b>'+(S.fastlio?'LIO':'无LIO')+' / '+(S.scan?(scanPts&&scanPts.length?(scanPts.length/2|0)+'点':'无数据'):'未启动')+'</b></div>'+
-      '<div>定位 <b>'+(locReady?'已对齐(贴墙)':(relocBusy?'匹配中…':(initP.x!=null?'精修中/待确认':'待定·可设初值')))+'</b></div>'+
+      '<div>定位模式 <b>'+(relocMode==='auto'?'自动重定位':'里程计')+'</b></div>'+
+      '<div>定位 <b>'+(locReady?'已对齐(贴墙)':(relocBusy?'匹配中…':(initP.x!=null?'收敛中/待确认':'待定·自动重定位中')))+'</b></div>'+
       '<div>初值 <b>'+(initP.x==null?'-':initP.x.toFixed(2)+','+initP.y.toFixed(2))+'</b></div>'+
       '<div>目标 <b>'+(goal.x==null?'-':goal.x.toFixed(2)+','+goal.y.toFixed(2))+'</b></div>'+
       '<div style="margin-top:6px;font-size:11px;color:var(--dim)">图例：白=可通行 · 黑=障碍 · 灰=未知</div>'+
@@ -1400,6 +1411,12 @@ function startSubs(){
   sub('/web/robot_pose','geometry_msgs/PoseStamped',m=>{
     if(UI.route==='map')return;
     var p=m.pose.position, q=m.pose.orientation;
+    // web_ops 只在 map→base_footprint TF 存在时才发这条消息（见其 cb_robot_pose_timer）；
+    // 收到即代表 AMCL 已经有效定位——不管是自动重定位还是手动「设初始位姿」触发的。
+    if(S.nav2 && !locReady){
+      locReady=true; window._needInitToast=false;
+      updateHint();highlightNext();renderSide();
+    }
     feedNavPose(p.x,p.y,yawOf(q),p.z,q);
     _navPoseTs=Date.now();
     syncPoseSide(); draw();
@@ -1496,10 +1513,13 @@ function renderChips(){
 /* ---- mapping / nav actions ---- */
 function startMapping(){
   if(S.nav2){toast('请先关闭导航','err');return}
+  if(window._mapStarting){toast('启动建图中，请稍候…');return}
   if(mappingSession||mappingPhase==='running'){toast('建图已在运行','err');return}
+  window._mapStarting=true; syncMapButtons();
   toast('清理 PCD 并启动建图…');
   httpPost(API+'/api/mapping/start',{},r=>{
-    if(!r||!r.ok){toast((r&&r.error)||'启动失败','err');return}
+    window._mapStarting=false;
+    if(!r||!r.ok){toast((r&&r.error)||'启动失败','err');syncMapButtons();return}
     mappingSession=true;
     mappingPhase='running'; mapPcdReady=false;
     clearMapCloud();
@@ -1508,13 +1528,16 @@ function startMapping(){
     pub('/web/mapping','std_msgs/Empty',{});
     updateHint();syncMapButtons();highlightNext();renderSide();
     setTimeout(()=>refreshMapStatus(),2500);
-  },e=>toast('启动失败','err'));
+  },e=>{window._mapStarting=false;toast('启动失败','err');syncMapButtons()});
 }
 function stopMapping(){
   if(!mappingSession && mappingPhase!=='running'){toast('当前未在建图','err');return}
+  if(window._mapStopping){toast('停止建图中，请稍候…');return}
   if(!confirm('停止建图并保存点云 PCD？（稍后可转 PGM）'))return;
+  window._mapStopping=true; syncMapButtons();
   toast('正在停止并落盘 PCD…');
   httpPost(API+'/api/mapping/stop',{},r=>{
+    window._mapStopping=false;
     mapPcdReady=!!(r&&r.pcd_ready);
     mappingSession=false;
     S.fastlio=false;
@@ -1523,20 +1546,23 @@ function stopMapping(){
     else toast((r&&r.error)||'已停止但没有 PCD：请重新「开始建图」覆盖后再停止','err');
     updateHint();syncMapButtons();highlightNext();renderSide();
     refreshMapStatus();
-  },()=>toast('停止失败','err'));
+  },()=>{window._mapStopping=false;toast('停止失败','err');syncMapButtons()});
 }
 function saveMapping(){
   if(S.nav2){toast('请先关闭导航','err');return}
+  if(window._mapSaving){toast('正在转换中，请稍候（大点云可能要一分钟左右）…');return}
   if(mappingSession||mappingPhase==='running'){toast('请先停止建图','err');return}
   if(!mapPcdReady){toast('无可用 PCD，无法保存','err');return}
   var name=($('mapName')&&$('mapName').value.trim())||'map_live';
   if(!confirm('将 PCD 转为 2D 栅格地图「'+name+'.pgm」？'))return;
-  toast('正在转换为 PGM…');
+  window._mapSaving=true; syncMapButtons();
+  toast('正在转换为 PGM…可能要几十秒，请勿刷新页面');
   httpPost(API+'/api/mapping/save',{name:name},r=>{
+    window._mapSaving=false;
     if(r.ok){mappingSession=false;mappingPhase='saved';mapPcdReady=false;freshMap=r.name;UI.selMap=r.name;localStorage.setItem('dog_selMap',r.name);toast('地图已保存：'+r.name,'ok');setTimeout(()=>go('maps'),500)}
     else toast('保存失败: '+(r.error||''),'err');
     updateHint();syncMapButtons();highlightNext();
-  },e=>toast('保存失败','err'));
+  },e=>{window._mapSaving=false;toast('保存失败：请求未返回（可能超时）','err');syncMapButtons()});
 }
 function refreshMapSelect(){
   var sel=$('mapSelect'); if(!sel)return;
@@ -1572,13 +1598,26 @@ function setNavMap(name){
   toast('已设为导航地图：'+name,'ok');
   refreshMaps();
 }
+function syncNavButtons(){
+  var start=$('btnStartNav'), stop=$('btnStopNav');
+  if(!start||!stop)return;
+  function setBtn(el, on, kind, busy, busyLabel, idleLabel){
+    if(busy){ el.disabled=true; el.className='mbtn is-off'; el.textContent=busyLabel; return; }
+    el.textContent=idleLabel;
+    el.disabled=!on;
+    el.className='mbtn '+(on?kind:'is-off');
+  }
+  setBtn(start, !S.nav2, 'primary', window._navStarting, '启动中…', '启动导航');
+  setBtn(stop, S.nav2, 'danger', window._navStopping, '关闭中…', '关闭导航');
+}
 function startNav(){
   if(mappingSession){toast('请先停止建图（导航会单独拉起定位用 LIO）','err');return}
   if(window._navStarting){toast('正在启动导航…');return}
+  if(S.nav2){toast('导航已经在运行','err');return}
   var map=($('mapSelect')&&$('mapSelect').value)||UI.selMap;
   if(!map){toast('请先在地图库选择/设为导航地图','err');return}
   UI.selMap=map;localStorage.setItem('dog_selMap',map);
-  window._navStarting=true;
+  window._navStarting=true; syncNavButtons();
   locReady=false; relocBusy=false;
   mappingSession=false;
   toast('正在启动定位 + Nav2 + 自动重定位…');
@@ -1590,40 +1629,67 @@ function startNav(){
       S.nav2=true;
       mappingSession=false;
       toast(r.hint||'已启动：等待自动重定位，也可手动设姿','ok');
+      // 新起的 auto_relocalize 默认是"自动重定位模式"；把上次记住的偏好同步过去
+      setTimeout(function(){ if(relocMode==='odom') setRelocMode('odom'); renderRelocMode(); }, 3000);
       setTimeout(function(){ pollRelocHint(); }, 8000);
     }else toast(r.error||'失败','err');
-    updateHint();highlightNext();renderSide();refreshSys();
-  },()=>{window._navStarting=false;toast('启动失败','err')});
+    syncNavButtons();updateHint();highlightNext();renderSide();refreshSys();
+  },()=>{window._navStarting=false;syncNavButtons();toast('启动失败','err')});
 }
 function stopNav(){
+  if(window._navStopping){toast('正在关闭导航…');return}
+  if(!S.nav2){toast('导航未在运行','err');return}
+  window._navStopping=true; syncNavButtons();
+  toast('正在关闭导航…');
   httpPost(API+'/api/nav2/stop',{},r=>{
+    window._navStopping=false;
     S.nav2=false; locReady=false; relocBusy=false; UI.activeMap='';
     armed=''; if($('cv'))$('cv').classList.remove('cross');
     toast('已关闭导航','ok');
-    updateHint();highlightNext();renderSide();refreshSys();
+    syncNavButtons();updateHint();highlightNext();renderSide();refreshSys();
   },()=>{
+    window._navStopping=false;
     pub('/web/stop_nav2','std_msgs/Empty',{});
     S.nav2=false; toast('已请求关闭导航');
-    updateHint();highlightNext();renderSide();
+    syncNavButtons();updateHint();highlightNext();renderSide();
   });
 }
 function requestRelocalize(){
   if(!S.nav2){toast('请先启动导航','err');return}
   if(relocBusy){toast('重定位进行中…');return}
   relocBusy=true; locReady=false; updateHint();renderSide();
-  toast(initP.x!=null?'正在初值附近 ICP 贴墙…':'请先「设初始位姿」，再点重新定位做 ICP');
+  toast('正在全图搜索匹配位置…');
   httpPost(API+'/api/nav2/relocalize',{},r=>{
     relocBusy=false;
     if(r.ok){
       locReady=true;
-      toast('ICP 对齐成功（激光贴障碍）','ok');
+      toast('重定位成功（激光贴障碍）','ok');
     }else{
       locReady=false;
-      toast((r.error||'ICP未收敛')+' — 请对准所在位置「设初始位姿」','err');
+      toast((r.error||'全局重定位未收敛')+' — 也可对准所在位置「设初始位姿」','err');
       setArmed('init');
     }
     updateHint();highlightNext();renderSide();
   },()=>{relocBusy=false;toast('重定位请求失败','err');updateHint();renderSide()});
+}
+function renderRelocMode(){
+  var a=$('btnRelocAuto'), o=$('btnRelocOdom');
+  if(a)a.classList.toggle('armed',relocMode==='auto');
+  if(o)o.classList.toggle('armed',relocMode==='odom');
+}
+function setRelocMode(mode){
+  if(!S.nav2){toast('请先启动导航','err');return}
+  if(mode===relocMode)return;
+  httpPost(API+'/api/nav2/reloc_mode',{mode:mode},r=>{
+    if(r.ok){
+      relocMode=r.mode||mode;
+      localStorage.setItem('relocMode',relocMode);
+      renderRelocMode();
+      toast(relocMode==='auto'?'已切到自动重定位模式':'已切到里程计模式（不自动重定位，需要时点「手动重定位」）','ok');
+    }else{
+      toast(r.error||'切换定位模式失败','err');
+    }
+  },()=>{toast('切换定位模式请求失败','err')});
 }
 function changeNavMap(){
   var map=($('mapSelect')&&$('mapSelect').value)||UI.selMap;
@@ -1631,34 +1697,19 @@ function changeNavMap(){
   setNavMap(map);
 }
 function pollRelocHint(){
+  // locReady 本身已经由 /web/robot_pose 是否有数据实时反映（map→base_footprint TF
+  // 存在即成功，见其订阅回调），这里只负责失败时的一次性提示兜底。
   if(!S.nav2||locReady)return;
   httpGet(API+'/api/log?file=auto_relocalize.log&n=50',r=>{
     var t=(r&&r.log)||'';
-    if(/请设初始位姿|need_init|重定位拒绝/.test(t) && !/重定位成功:[^\n]*hit=/.test(t.slice(-800))){
-      // 全局失败：引导手设初值（只 toast 一次）
+    var tail=t.slice(-800);
+    // 失败：匹配分过低 / 激光束太少 / 地图或激光未就绪（只 toast 一次，引导手设初值兜底）
+    if(/匹配分过低|有效激光束过少|地图或激光数据未就绪/.test(tail) && !locReady){
       if(!window._needInitToast){
         window._needInitToast=true;
-        toast('自动匹配未贴墙 — 请「设初始位姿」，系统会在附近精修','err');
+        toast('自动重定位未收敛 — 可挪到特征更多的位置，或「设初始位姿」兜底','err');
         updateHint();highlightNext();renderSide();
       }
-    }
-    // 成功：ICP成功 或 带 hit=
-    if(/ICP成功:[^\n]*hit=([0-9.]+)/.test(t) || /ICP成功/.test(t)){
-      var hm=t.match(/ICP成功:[^\n]*hit=([0-9.]+)/);
-      if(!hm || parseFloat(hm[1])>=30){
-        locReady=true; window._needInitToast=false;
-        toast('ICP 对齐成功（激光贴障碍）','ok');
-        updateHint();highlightNext();renderSide();
-        return;
-      }
-    }
-    var m=t.match(/重定位成功:[^\n]*hit=([0-9.]+)%/g);
-    if(!m||!m.length)return;
-    var last=m[m.length-1], hm=last.match(/hit=([0-9.]+)/), tm=last.match(/tight=([0-9.]+)/);
-    if(hm&&parseFloat(hm[1])>=40 && tm&&parseFloat(tm[1])>=0.45){
-      locReady=true; window._needInitToast=false;
-      toast('自动重定位成功（激光贴障碍）','ok');
-      updateHint();highlightNext();renderSide();
     }
   },()=>{});
 }
@@ -2285,11 +2336,9 @@ cv.addEventListener('pointerup',()=>{
   var mode=drag.mode,x=drag.x,y=drag.y; drag=null; armed=''; $('cv').classList.remove('cross');
   if(mode==='init'){
     initP={x:x,y:y,yaw:yaw};
-    locReady=false;  // 等附近精修贴墙后再标已对齐
+    locReady=false;  // 等 AMCL 收敛(map→base_footprint TF 出现)后 /web/robot_pose 会自动置真
     pub('/web/init_pose','geometry_msgs/Twist',{linear:{x:x,y:y,z:0},angular:{x:0,y:0,z:yaw}});
-    toast('初值已下发，正在附近平移+旋转贴墙（不必很准）…','ok');
-    // 精修由 auto_relocalize 订阅 /initialpose 触发；轮询结果
-    setTimeout(function(){ pollRelocHint(); }, 1500);
+    toast('初值已下发，AMCL 正在收敛（不必很准，走两步会自己贴墙）…','ok');
     setTimeout(function(){ pollRelocHint(); }, 4000);
   }else{
     goal={x:x,y:y,yaw:yaw};
@@ -2311,6 +2360,23 @@ function sendVel(){
   if(!velPub)velPub=new ROSLIB.Topic({ros:ros,name:'/cmd_vel',messageType:'geometry_msgs/Twist'});
   velPub.publish({linear:{x:vel.vx,y:vel.vy,z:0},angular:{x:0,y:0,z:vel.wz}});
 }
+// 安全兜底：松开摇杆的 pointerup/pointercancel 有时不会送达摇杆本身
+// （触屏被系统手势/滚动截走、切后台、多指冲突等），一旦漏掉，vel 会停在
+// 最后一次非零值，靠 100ms 重发循环一直喂下去，狗就停不下来——只有再摸一下
+// 摇杆中心、发一次 (0,0) 才会停，这正是用户反馈的"必须点中心才停"现象。
+// 两道保险：① window 级兜底监听，只要页面任何地方发生 pointerup/cancel/
+// 失焦/切后台，就把所有当前按住的摇杆当成松开处理；② 无论上面有没有生效，
+// 每根摇杆记一个"最后一次真实移动事件"时间戳，重发循环里超过 400ms 没更新
+// 就强制清零并停止重发——即使两个事件都没收到也能自愈。
+var _joyEnders=[];
+var _joyIsDownFns=[];
+var _joyLastTouch=0;
+var JOY_STALE_MS=400;
+function _anyJoyDown(){ return _joyIsDownFns.some(function(f){return f()}); }
+function _anyKeyDown(){
+  return !!(keys && (keys['w']||keys['arrowup']||keys['s']||keys['arrowdown']||
+    keys['a']||keys['d']||keys['arrowleft']||keys['q']||keys['arrowright']||keys['e']));
+}
 function bindJoy(pad,knob,kind){
   if(!pad||!knob)return;
   var down=false;
@@ -2330,6 +2396,7 @@ function bindJoy(pad,knob,kind){
       vel.vx=-dy*VX; vel.vy=-dx*VY; // 右拨 = 右移（ROS +y 向左，故取反）
     }
     knob.style.transform='translate(-50%,-50%)';
+    _joyLastTouch=Date.now();
     sendVel();
   }
   function end(){
@@ -2338,7 +2405,9 @@ function bindJoy(pad,knob,kind){
     if(kind==='turn')vel.wz=0; else {vel.vx=0;vel.vy=0}
     sendVel();
   }
-  pad.addEventListener('pointerdown',e=>{down=true;pad.setPointerCapture(e.pointerId);move(e.clientX,e.clientY)});
+  _joyEnders.push(function(){ if(down) end(); });
+  _joyIsDownFns.push(function(){ return down; });
+  pad.addEventListener('pointerdown',e=>{down=true;_joyLastTouch=Date.now();pad.setPointerCapture(e.pointerId);move(e.clientX,e.clientY)});
   pad.addEventListener('pointermove',e=>{if(down)move(e.clientX,e.clientY)});
   pad.addEventListener('pointerup',end);
   pad.addEventListener('pointercancel',end);
@@ -2348,8 +2417,27 @@ bindJoy($('joyTurn'),$('knobTurn'),'turn');
 bindJoy($('mcJoyMove'),$('mcKnobMove'),'move');
 bindJoy($('mcJoyTurn'),$('mcKnobTurn'),'turn');
 
-// 100ms retransmit while held (like v2)
-setInterval(()=>{ if(vel.vx||vel.vy||vel.wz) sendVel(); },100);
+// ① window 级兜底：任何地方松手/取消/切后台/失焦，都强制当成所有摇杆已松开
+function _joyEndAll(){ _joyEnders.forEach(function(f){f()}); }
+window.addEventListener('pointerup',_joyEndAll);
+window.addEventListener('pointercancel',_joyEndAll);
+window.addEventListener('blur',_joyEndAll);
+document.addEventListener('visibilitychange',()=>{ if(document.hidden)_joyEndAll(); });
+
+// 100ms retransmit while held (like v2)；② 没有摇杆按着、也没有方向键按着，
+// 但还在发非零速度超过 JOY_STALE_MS，判定是漏了松开事件，强制清零兜底。
+// 用"当前是否真的按着"而不是"事件时间戳"来判断，避免键盘长按时系统重复率
+// 万一偏慢，被误判成"松手了"反而把正常驾驶打断。
+setInterval(()=>{
+  if(!(vel.vx||vel.vy||vel.wz))return;
+  if(_anyJoyDown()||_anyKeyDown()){ sendVel(); return; }
+  if(Date.now()-_joyLastTouch>JOY_STALE_MS){
+    vel={vx:0,vy:0,wz:0};
+    sendVel();
+    return;
+  }
+  sendVel();
+},100);
 
 var keys={};
 window.addEventListener('keydown',e=>{
@@ -2459,7 +2547,7 @@ function refreshSys(){
     }
     if(r.ctrl)setCtrlLabel(r.ctrl);
     else if(r.services) setCtrlLabel(r.services.bridge?'SDK':'APP');
-    if(r.services){Object.assign(S,r.services);renderChips();setConn(connected);setCtrlLabel(S.bridge?'SDK':'APP')}
+    if(r.services){Object.assign(S,r.services);renderChips();setConn(connected);setCtrlLabel(S.bridge?'SDK':'APP');syncNavButtons();highlightNext()}
   },()=>{setApiWarn(true)});
 }
 var apiWarnShown=false;
