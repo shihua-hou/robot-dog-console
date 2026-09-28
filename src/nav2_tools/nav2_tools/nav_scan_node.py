@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
-"""nav_scan_node — Mid360 /cloud_registered → /scan in base_footprint.
+"""nav_scan_node — /cloud_registered → /scan，算法与建图页 3D 点云一致。
 
-Leveling: the lio_tf_bridge TF chain (camera_init → body → base_link, with a
-static +45° "mount leveling" edge) was found to be WRONG — near-robot points
-that must be floor were coming out at 0.7-2.5m in 'base_link' instead of
-~0m. Root cause: FAST-LIO's 'camera_init' world frame is not gravity-vertical
-here (it just pins to wherever 'body' pointed at boot, ~45° tilted with the
-physical mount), and the static body→base_link correction did not actually
-cancel that tilt (verified empirically on-robot, see chat history).
+建图页 (web_ui/index.html rebuildMapPoints) 已验证正确：
+  1. /cloud_registered（camera_init）
+  2. levelMat = rot_align(nominalUp(pitch_down, roll), +Z)  # 俯仰校平
+  3. hh = qz + lidar_z                                     # 离地高度
+  4. 高度带过滤后画点
 
-Fix: level the cloud ourselves using the real, IMU-measured gravity "up"
-vector (same source as scripts/calib_lidar_imu_gravity.py and the web UI's
-nominalUp()/levelMat()), applied on top of the *dynamic* camera_init→body TF
-(so it still tracks the robot's real-time pose while walking), instead of
-trusting the static body→base_link TF edge. Verified on-robot: floor lands
-near z≈0 consistently from 0-6m range after this fix (was scattered
-0.7-2.5m before, at every range).
+本节点做同样的事，只是把当前帧变到 body（雷达）后再校平，
+取高度带投影成 LaserScan，并平移到 base_footprint（雷达在基座前方 lidar_x）。
 
-Config: reads pitch_down/roll from config/lidar_extrinsic.yaml (written by
-scripts/calib_lidar_imu_gravity.py --apply); falls back to the nominal 45°/0°
-mount spec if the file is missing.
+禁止再做 y=-y / 外参方向翻转等「对冲」——左右前后以建图页为准。
 """
 from __future__ import annotations
 
@@ -34,13 +25,14 @@ from sensor_msgs.msg import PointCloud2, LaserScan
 from tf2_ros import Buffer, TransformListener
 import sensor_msgs_py.point_cloud2 as pc2
 
+
 EXTRINSIC_YAML = '/home/linaro/robot_ws/config/lidar_extrinsic.yaml'
-NOMINAL_PITCH_DOWN = 0.7853981634  # 45 deg, mount spec fallback
+NOMINAL_PITCH_DOWN = 0.7853981634  # 45 deg
 NOMINAL_ROLL = 0.0
 
 
-def load_pitch_roll(path=EXTRINSIC_YAML):
-    pitch, roll = NOMINAL_PITCH_DOWN, NOMINAL_ROLL
+def load_extrinsic(path=EXTRINSIC_YAML):
+    pitch, roll, lidar_z = NOMINAL_PITCH_DOWN, NOMINAL_ROLL, 0.45
     try:
         with open(path, 'r') as f:
             for line in f:
@@ -48,26 +40,27 @@ def load_pitch_roll(path=EXTRINSIC_YAML):
                 if not line or ':' not in line:
                     continue
                 k, v = line.split(':', 1)
-                k = k.strip()
+                k, v = k.strip(), v.strip()
                 if k == 'pitch_down':
-                    pitch = float(v.strip())
+                    pitch = float(v)
                 elif k == 'roll':
-                    roll = float(v.strip())
+                    roll = float(v)
+                elif k == 'lidar_z':
+                    lidar_z = float(v)
     except Exception:
         pass
-    return pitch, roll
+    return pitch, roll, lidar_z
 
 
 def nominal_up(pitch_down, roll):
-    """Unit 'up' vector expressed in the tilted sensor (body) frame.
-    Matches web_ui/index.html nominalUp() and calib_lidar_imu_gravity.py."""
+    """与 web_ui nominalUp() / calib_lidar_imu_gravity.py 相同。"""
     sp, cp = math.sin(pitch_down), math.cos(pitch_down)
     sr, cr = math.sin(roll), math.cos(roll)
     return (-sp, sr * cp, cr * cp)
 
 
 def rot_align(a, b):
-    """3x3 rotation matrix (row-major tuple of tuples) mapping unit vector a -> b."""
+    """3x3 行主序，把单位向量 a 旋到 b。等同 web levelMat() / pcd2pgm level_mat_from_normal。"""
     an = math.sqrt(sum(c * c for c in a)) or 1.0
     a = tuple(c / an for c in a)
     bn = math.sqrt(sum(c * c for c in b)) or 1.0
@@ -87,14 +80,6 @@ def rot_align(a, b):
     )
 
 
-def mat_vec(R, v):
-    return (
-        R[0][0]*v[0] + R[0][1]*v[1] + R[0][2]*v[2],
-        R[1][0]*v[0] + R[1][1]*v[1] + R[1][2]*v[2],
-        R[2][0]*v[0] + R[2][1]*v[1] + R[2][2]*v[2],
-    )
-
-
 def transform_to_mat(tf):
     q = tf.transform.rotation
     x, y, z, w = q.x, q.y, q.z, q.w
@@ -107,36 +92,40 @@ def transform_to_mat(tf):
     return R, (t.x, t.y, t.z)
 
 
-def apply_Rt(R, t, px, py, pz):
+def apply_R(R, px, py, pz):
     return (
-        R[0][0] * px + R[0][1] * py + R[0][2] * pz + t[0],
-        R[1][0] * px + R[1][1] * py + R[1][2] * pz + t[1],
-        R[2][0] * px + R[2][1] * py + R[2][2] * pz + t[2],
+        R[0][0] * px + R[0][1] * py + R[0][2] * pz,
+        R[1][0] * px + R[1][1] * py + R[1][2] * pz,
+        R[2][0] * px + R[2][1] * py + R[2][2] * pz,
     )
+
+
+def apply_Rt(R, t, px, py, pz):
+    x, y, z = apply_R(R, px, py, pz)
+    return (x + t[0], y + t[1], z + t[2])
 
 
 class NavScanNode(Node):
     def __init__(self):
         super().__init__('nav_scan_node')
+        # 高度带：离地高度 hh（与建图页 MapGnd.minH/maxH 同语义，导航障碍带更窄）
         self.z_min = float(self.declare_parameter('z_min', 0.10).value)
-        self.z_max = float(self.declare_parameter('z_max', 1.0).value)
+        self.z_max = float(self.declare_parameter('z_max', 1.20).value)
         self.range_min = float(self.declare_parameter('range_min', 0.20).value)
         self.range_max = float(self.declare_parameter('range_max', 8.0).value)
         self.angle_increment = float(self.declare_parameter('angle_increment', 0.01).value)
         self.lidar_x = float(self.declare_parameter('lidar_x', 0.25).value)
         self.lidar_y = float(self.declare_parameter('lidar_y', 0.0).value)
-        self.lidar_z = float(self.declare_parameter('lidar_z', 0.45).value)
+
+        pitch_down, roll, yaml_z = load_extrinsic()
+        self.lidar_z = float(self.declare_parameter('lidar_z', yaml_z).value)
         self._nbin = max(1, int(round((2.0 * math.pi) / self.angle_increment)))
         self._miss_tf = 0
         self._ok = 0
 
-        pitch_down, roll = load_pitch_roll()
+        # 与建图页 levelMat() 完全一致：45° 下仰校平，不要删、不要改走 base_link 代替
         up = nominal_up(pitch_down, roll)
-        self.R_level = rot_align(up, (0.0, 0.0, 1.0))
-        # body(livox) -> base_link translation, leveled (same physical offset
-        # as lio_tf_bridge's body_to_base_link_static, recomputed with our
-        # verified-correct rotation instead of its rotation).
-        self.t_level = tuple(-c for c in mat_vec(self.R_level, (self.lidar_x, self.lidar_y, self.lidar_z)))
+        self.R_align = rot_align(up, (0.0, 0.0, 1.0))
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -145,35 +134,71 @@ class NavScanNode(Node):
             PointCloud2, '/cloud_registered', self.cb_cloud, qos_profile_sensor_data)
 
         self.get_logger().info(
-            'nav_scan: leveled(pitch_down=%.1f° roll=%.1f°) z=[%.2f,%.2f] → /scan(base_footprint)'
-            % (math.degrees(pitch_down), math.degrees(roll), self.z_min, self.z_max))
+            'nav_scan(=建图页45°校平): pitch_down=%.1f° roll=%.1f° lidar_z=%.2f '
+            'band=[%.2f,%.2f] lidar_xy=(%.2f,%.2f) → /scan(base_footprint)'
+            % (math.degrees(pitch_down), math.degrees(roll), self.lidar_z,
+               self.z_min, self.z_max, self.lidar_x, self.lidar_y))
 
     def cb_cloud(self, msg: PointCloud2):
-        # Dynamic real-time sensor pose (tracks robot motion); leveling itself
-        # is applied on top with our own verified-correct rotation, not the
-        # (buggy) static body->base_link TF edge.
+        # 点云在 camera_init。流程与建图页一致：
+        #   body←camera_init → R_align(45°校平) → 高度带 → +lidar_xy → /scan(base_footprint)
+        # 时间戳必须与本次 TF 同一拍，且不得超过 TF 时刻（否则一走红点就漂）。
+        now = self.get_clock().now()
         try:
-            tf = self.tf_buffer.lookup_transform(
-                'body', msg.header.frame_id,
-                rclpy.time.Time(),
+            tf_fp = self.tf_buffer.lookup_transform(
+                'odom', 'base_footprint', rclpy.time.Time(),
                 timeout=Duration(seconds=0.05))
         except Exception:
             self._miss_tf += 1
             if self._miss_tf % 30 == 1:
+                self.get_logger().warn('waiting TF odom→base_footprint')
+            return
+        tf_t = rclpy.time.Time.from_msg(tf_fp.header.stamp)
+        if (now - tf_t).nanoseconds > int(0.40 * 1e9):
+            self._miss_tf += 1
+            if self._miss_tf % 20 == 1:
                 self.get_logger().warn(
-                    'waiting TF body←%s (miss=%d)'
-                    % (msg.header.frame_id, self._miss_tf))
+                    'odom→base_footprint TF stale (%.0fms), skip scan'
+                    % ((now - tf_t).nanoseconds / 1e6))
             return
 
-        R, t = transform_to_mat(tf)
-        Rl, tl = self.R_level, self.t_level
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                'body', msg.header.frame_id, tf_t,
+                timeout=Duration(seconds=0.05))
+        except Exception:
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    'body', msg.header.frame_id, rclpy.time.Time(),
+                    timeout=Duration(seconds=0.05))
+                tf_t = rclpy.time.Time.from_msg(tf.header.stamp)
+            except Exception:
+                self._miss_tf += 1
+                if self._miss_tf % 30 == 1:
+                    self.get_logger().warn(
+                        'waiting TF body←%s (miss=%d)'
+                        % (msg.header.frame_id, self._miss_tf))
+                return
+
+        R, tvec = transform_to_mat(tf)
+        Ra = self.R_align
+        zoff = self.lidar_z
+        lx, ly = self.lidar_x, self.lidar_y
         bins = [self.range_max + 1.0] * self._nbin
         n_keep = 0
+
         for p in pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True):
-            bx, by, bz = apply_Rt(R, t, float(p[0]), float(p[1]), float(p[2]))
-            x, y, z = apply_Rt(Rl, tl, bx, by, bz)
-            if z < self.z_min or z > self.z_max:
+            # 1) 世界点 → 雷达机系 body
+            bx, by, bz = apply_Rt(R, tvec, float(p[0]), float(p[1]), float(p[2]))
+            # 2) 建图页同款 45° 校平
+            qx, qy, qz = apply_R(Ra, bx, by, bz)
+            # 3) 离地高度
+            hh = qz + zoff
+            if hh < self.z_min or hh > self.z_max:
                 continue
+            # 4) 平移到 base_footprint（雷达在前方）
+            x = qx + lx
+            y = qy + ly
             rng = math.hypot(x, y)
             if rng < self.range_min or rng > self.range_max:
                 continue
@@ -184,8 +209,12 @@ class NavScanNode(Node):
             n_keep += 1
 
         scan = LaserScan()
-        scan.header.stamp = msg.header.stamp
-        # Nav2 / overlay expect base_footprint; xy/yaw match our leveled frame
+        stamp_t = tf_t - Duration(seconds=0.01)
+        if stamp_t.nanoseconds < 0:
+            stamp_t = rclpy.time.Time(seconds=0)
+        if stamp_t.nanoseconds > tf_t.nanoseconds:
+            stamp_t = tf_t
+        scan.header.stamp = stamp_t.to_msg()
         scan.header.frame_id = 'base_footprint'
         scan.angle_min = -math.pi
         scan.angle_max = math.pi
@@ -201,7 +230,8 @@ class NavScanNode(Node):
         if self._ok % 50 == 1:
             valid = sum(1 for r in bins if r <= self.range_max)
             self.get_logger().info(
-                'scan ok: band_pts~%d beams=%d/%d' % (n_keep, valid, self._nbin))
+                'scan ok (body+45°align): band_pts~%d beams=%d/%d'
+                % (n_keep, valid, self._nbin))
 
 
 def main():

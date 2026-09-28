@@ -362,10 +362,17 @@ def despeckle(grid, min_neighbors=2, passes=2):
 
 
 def write_pgm(grid, path):
+    """Write PGM for nav2 map_server.
+
+    OccupancyGrid: row0 = origin = low world-Y.
+    PGM/image: row0 = top of image. map_server flips on load so that
+    image-top → high world-Y. Therefore we must write high-Y rows first,
+    otherwise saved maps are Y-mirrored vs the PCD / live /scan.
+    """
     h, w = len(grid), len(grid[0])
     with open(path, 'wb') as f:
         f.write(b'P5\n%d %d\n255\n' % (w, h))
-        for iy in range(h):
+        for iy in range(h - 1, -1, -1):  # high world-Y first (= image top)
             row = bytearray()
             for ix in range(w):
                 v = grid[iy][ix]

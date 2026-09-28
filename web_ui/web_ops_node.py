@@ -51,8 +51,11 @@ from PIL import Image
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 from geometry_msgs.msg import Twist, Quaternion, PoseWithCovarianceStamped, PoseStamped
-from std_msgs.msg import String, Empty
+from std_msgs.msg import String, Empty, Float32MultiArray
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import OccupancyGrid
 from nav2_msgs.action import NavigateToPose
 from tf2_ros import Buffer, TransformListener
 from rclpy.duration import Duration
@@ -263,6 +266,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(mapping_status())
             elif path == '/api/lidar_extrinsic':
                 self._send_json(load_lidar_extrinsic())
+            elif path == '/api/nav2/map':
+                self._send_json(current_map_json())
             elif path == '/api/log':
                 file = query.get('file', 'webops.log')
                 n = int(query.get('n', '50'))
@@ -300,8 +305,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(stop_nav2_api())
             elif path == '/api/nav2/relocalize':
                 self._send_json(call_relocalize())
+            elif path == '/api/nav2/accept_pose':
+                self._send_json(accept_reloc_pose())
             elif path == '/api/nav2/reloc_mode':
-                self._send_json(set_reloc_mode(body))
+                # 已取消双模式：仅手动重定位（点按钮才搜图）
+                self._send_json({'ok': True, 'mode': 'manual', 'note': '仅手动重定位：点「重定位」按钮执行'})
             elif path == '/api/nav2/reload_map':
                 self._send_json(reload_nav_map(body))
             elif path == '/api/restart_rosbridge':
@@ -681,20 +689,45 @@ def stop_mapping_keep_pcd():
 
 
 def start_mapping_session(body=None):
-    """清理旧 PCD 后启动/确保建图链（幂等，不会叠多个 Livox）。"""
-    if proc_alive('component_container_isolated'):
-        return {'ok': False, 'error': '请先关闭导航'}
-    # 若已在建图，仅确保预览
-    if proc_alive('fastlio_mapping'):
-        if not proc_alive('map_building_node'):
-            run_bg(
-                'ros2 launch nav2_tools map_building.launch.py',
-                '/tmp/map_building.log')
-        return {'ok': True, 'already_running': True, 'cleared': []}
-    cleared = clear_pcd_cache()
-    # start_all.sh is idempotent: collapses duplicate Livox/LIO first
-    run_bg(f'bash {START_ALL} mapping', '/tmp/mapping.log')
-    return {'ok': True, 'started': True, 'cleared': cleared.get('removed', [])}
+    """清理旧 PCD 后启动/确保建图链（幂等，不会叠多个 Livox）。
+
+    真正的幂等靠 fastlio_mapping/map_building_node 是否已存活来判断，但
+    run_bg() 是异步的——从"没看到进程"到"进程真的起来"之间有好几秒空窗。
+    两次几乎同时的 /api/mapping/start 请求（双击、页面重试、脚本和网页撞车）
+    都会在这个空窗里各自判定"没在跑"然后各起一份 start_all.sh mapping，
+    而 start_all.sh 自己的 ensure_one() 也是同样的检查-再启动，两边一起
+    竞态就会叠出两个 fastlio_mapping + 两个 map_building_node 抢同一路雷达，
+    建图直接乱掉（这次排查到的真实故障)。用一把进程内锁把"决定要不要启动"
+    这段收窄到互斥执行，第二个请求要么等第一个判定完直接复用，要么在第一个
+    还没判定完时立刻被拒绝，不会再有两边同时通过检查的窗口。
+    """
+    global _mapping_starting
+    with _mapping_lock:
+        if _mapping_starting:
+            return {'ok': False, 'error': '建图正在启动中，请稍候'}
+        if proc_alive('component_container_isolated'):
+            return {'ok': False, 'error': '请先关闭导航'}
+        # 若已在建图，仅确保预览
+        if proc_alive('fastlio_mapping'):
+            if not proc_alive('map_building_node'):
+                run_bg(
+                    'ros2 launch nav2_tools map_building.launch.py',
+                    '/tmp/map_building.log')
+            return {'ok': True, 'already_running': True, 'cleared': []}
+        _mapping_starting = True
+    try:
+        cleared = clear_pcd_cache()
+        # start_all.sh is idempotent: collapses duplicate Livox/LIO first
+        run_bg(f'bash {START_ALL} mapping', '/tmp/mapping.log')
+        # 等 start_all.sh 里的 ensure_one() 真正把 fastlio_mapping 跑起来再放锁，
+        # 覆盖掉 run_bg() 异步返回到进程实际存活之间的那段窗口。
+        for _ in range(30):
+            if proc_alive('fastlio_mapping'):
+                break
+            time.sleep(0.5)
+        return {'ok': True, 'started': True, 'cleared': cleared.get('removed', [])}
+    finally:
+        _mapping_starting = False
 
 
 def discard_mapping():
@@ -817,6 +850,9 @@ _nav2_lock = threading.Lock()
 _nav2_starting = False
 _nav2_current_map = None  # 幂等启动用: 同一张图已在跑就别重新盲搜, 见 _start_nav2_impl
 
+_mapping_lock = threading.Lock()
+_mapping_starting = False
+
 
 _loc_heal_ts = 0.0
 
@@ -865,16 +901,124 @@ def stop_nav2_procs():
 
 
 def ensure_auto_relocalize():
-    if proc_alive('auto_relocalize'):
+    """保证只有一个 auto_relocalize；重复实例会连环刷 /initialpose 打乱导航。"""
+    def _collect():
+        bins, launches = [], []
+        me = os.getpid()
+        for name in os.listdir('/proc'):
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid == me:
+                continue
+            try:
+                with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                    cmd = f.read().replace(b'\0', b' ').decode('utf-8', 'ignore')
+            except Exception:
+                continue
+            if 'extglob' in cmd or 'COMMAND_EXIT_CODE' in cmd:
+                continue
+            if 'auto_relocalize/auto_relocalize' in cmd:
+                bins.append(pid)
+            elif 'auto_relocalize.launch' in cmd or (
+                    'ros2 launch' in cmd and 'auto_relocalize' in cmd):
+                launches.append(pid)
+        return bins, launches
+
+    def _kill_all(bins, launches):
+        for pid in bins + launches:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+    bins, launches = _collect()
+    if len(bins) > 1 or len(launches) > 1:
+        _kill_all(bins, launches)
+        time.sleep(0.8)
+        bins, launches = _collect()
+
+    if len(bins) == 1:
         return True
+
+    if bins or launches:
+        _kill_all(bins, launches)
+        time.sleep(0.5)
+
     run_bg(
         'ros2 launch auto_relocalize auto_relocalize.launch.py',
         '/tmp/auto_relocalize.log')
     for _ in range(15):
-        if proc_alive('auto_relocalize'):
-            return True
         time.sleep(0.3)
-    return proc_alive('auto_relocalize')
+        bins, launches = _collect()
+        if len(bins) > 1 or len(launches) > 1:
+            _kill_all(bins, launches)
+            time.sleep(0.5)
+            run_bg(
+                'ros2 launch auto_relocalize auto_relocalize.launch.py',
+                '/tmp/auto_relocalize.log')
+            continue
+        if len(bins) == 1:
+            return True
+    bins, _ = _collect()
+    return len(bins) == 1
+
+
+_web_ops_node = None  # set in main(); HTTP handlers use it to gate nav
+
+
+def current_map_json():
+    """/map 的 HTTP 直取通道，绕开 rosbridge 对该话题的订阅时序问题（见 cb_map 注释）。
+
+    整形成跟 rosbridge 把 nav_msgs/OccupancyGrid 转成 JSON 时一样的结构，
+    前端可以直接把返回的 map 字段扔给现成的 ingest(m,'nav')，不用另外写解析。
+    """
+    node = _web_ops_node
+    msg = node._last_map if node is not None else None
+    if msg is None:
+        return {'ok': False, 'error': '地图还没加载（Nav2/map_server 可能还没起来）'}
+    o = msg.info.origin
+    return {
+        'ok': True,
+        'map': {
+            'info': {
+                'width': msg.info.width,
+                'height': msg.info.height,
+                'resolution': msg.info.resolution,
+                'origin': {
+                    'position': {'x': o.position.x, 'y': o.position.y, 'z': o.position.z},
+                    'orientation': {'x': o.orientation.x, 'y': o.orientation.y,
+                                    'z': o.orientation.z, 'w': o.orientation.w},
+                },
+            },
+            'data': list(msg.data),
+        },
+    }
+
+
+def accept_reloc_pose():
+    """用户承认当前位姿 / 手动设姿完成 → 锁定看门狗。"""
+    script = (
+        'source /opt/ros/humble/setup.bash && '
+        'source /home/linaro/robot_ws/install/setup.bash && '
+        'ros2 service call /accept_reloc_pose std_srvs/srv/Trigger'
+    )
+    try:
+        r = subprocess.run(
+            ['bash', '-lc', script],
+            capture_output=True, text=True, timeout=8.0)
+        out = (r.stdout or '') + (r.stderr or '')
+        ok = 'success=True' in out or 'success=true' in out
+        # 手动确认后允许导航（用户对当前红点-地图对齐负责）
+        if ok and _web_ops_node is not None:
+            _web_ops_node._loc_user_accepted = True
+            _web_ops_node._loc_aligned = True
+            _web_ops_node._loc_hit = max(_web_ops_node._loc_hit, 0.60)
+        return {'ok': ok, 'log': out[-400:], 'error': None if ok else (out[-200:] or 'accept failed')}
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': 'accept_reloc_pose 超时'}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
 
 
 def call_relocalize(timeout=35.0):
@@ -901,14 +1045,28 @@ def call_relocalize(timeout=35.0):
             ['bash', '-lc', script],
             capture_output=True, text=True, timeout=timeout)
         out = (r.stdout or '') + (r.stderr or '')
-        ok = 'success=True' in out or 'success=true' in out
+        called = 'success=True' in out or 'success=true' in out
+        aligned = False
+        import re
+        m = re.search(r'黑点命中=([0-9.]+)%', out)
+        hit = float(m.group(1)) / 100.0 if m else None
+        if hit is not None:
+            aligned = hit >= 0.60
+        elif 'aligned' in out and 'weak' not in out and 'mid' not in out:
+            aligned = True
         err = None
-        if not ok:
-            if '匹配分过低' in out or '有效激光束过少' in out:
-                err = '全局重定位匹配分过低，请把狗挪到特征更多的位置，或点"设初始位姿"手动指定大致位置'
-            else:
-                err = out[-300:] or 'relocalize failed'
-        return {'ok': ok, 'log': out[-800:], 'error': err}
+        if not called:
+            err = out[-300:] or 'relocalize failed'
+        elif not aligned:
+            err = '定位置信度尚未≥60%（将继续监测或请确认位姿）'
+        return {
+            'ok': bool(called and aligned),
+            'called': bool(called),
+            'aligned': bool(aligned),
+            'hit': hit,
+            'log': out[-800:],
+            'error': err,
+        }
     except subprocess.TimeoutExpired:
         return {'ok': False, 'error': '重定位超时（地图/激光可能未就绪）'}
     except Exception as e:
@@ -1032,13 +1190,16 @@ def _start_nav2_impl(body):
             'ok': True, 'map': m, 'already_running': True,
             'hint': '导航已经在跑（同一张图），未重新盲搜；定位不对就点"手动重定位"',
         }
+    # 建图/导航二选一，且要对称：之前这里是直接静默 kill_pattern('map_building_node')，
+    # 建图中点"启动导航"会在用户毫无察觉的情况下把建图预览杀掉（FAST-LIO 本身不停，
+    # 点云还在攒，但网页上突然看不到预览了）。现在跟 start_mapping_session() 的
+    # "导航中拒绝建图"保持对称：建图中一律拒绝启动导航，不再替用户做这个决定。
+    if proc_alive('map_building_node'):
+        return {'ok': False, 'error': '正在建图中，请先「停止建图」或「保存地图」后再启动导航'}
     _nav2_current_map = map_path
 
     # Singleton Nav2 — previous double-launch left two navigate_to_pose servers
     stop_nav2_procs()
-    # 导航 ≠ 建图：关掉建图预览；LIO 由 localization 模式占用（不做 map_building）
-    kill_pattern('map_building_node')
-    kill_pattern('map_building.launch')
 
     loc = ensure_localization_stack()
     if not loc['fastlio']:
@@ -1062,11 +1223,74 @@ def _start_nav2_impl(body):
     # Give map_server a moment, then start auto-relocalize
     time.sleep(2.0)
     reloc_ok = ensure_auto_relocalize()
+    # 后台催活：若 planner 仍在等 map→odom，AMCL set_initial_pose 会解；
+    # 再兜底把 inactive 的 bt/velocity_smoother 拉起来。
+    threading.Thread(target=_heal_nav2_lifecycle, args=(18.0,), daemon=True).start()
     return {
         'ok': True, 'map': m, 'scan': scan_ok, 'loc': loc,
         'auto_relocalize': reloc_ok,
-        'hint': '等待自动重定位（或手动设初始位姿）后再下目标',
+        'hint': '请点「重定位」或「设初始位姿」后再下目标',
     }
+
+
+def _heal_nav2_lifecycle(timeout_sec=18.0):
+    """Activate Nav2 lifecycle nodes left inactive after a stuck planner activate.
+
+    Uses `ros2 lifecycle` subprocesses (not in-process rclpy) so we never
+    clash with web_ops_node's own rclpy context.
+    """
+    names = [
+        'controller_server', 'smoother_server', 'planner_server',
+        'bt_navigator', 'behavior_server', 'waypoint_follower', 'velocity_smoother',
+    ]
+    deadline = time.time() + float(timeout_sec)
+    while time.time() < deadline and not proc_alive('component_container_isolated'):
+        time.sleep(0.4)
+    if not proc_alive('component_container_isolated'):
+        return
+    time.sleep(3.0)
+    env = dict(os.environ)
+    env['ROS_HOME'] = env.get('ROS_HOME', '/tmp/ros_home')
+    prefix = (
+        'source /opt/ros/humble/setup.bash && '
+        'source /home/linaro/robot_ws/install/setup.bash && '
+    )
+    while time.time() < deadline:
+        pending = False
+        for name in names:
+            try:
+                st = subprocess.run(
+                    ['bash', '-lc', prefix + f'ros2 lifecycle get /{name}'],
+                    capture_output=True, text=True, timeout=4, env=env)
+                out = ((st.stdout or '') + (st.stderr or '')).strip().lower()
+            except Exception:
+                pending = True
+                continue
+            # NOTE: "inactive" contains substring "active" — check inactive first.
+            if 'unconfigured' in out:
+                pending = True
+                try:
+                    subprocess.run(
+                        ['bash', '-lc', prefix + f'ros2 lifecycle set /{name} configure'],
+                        capture_output=True, text=True, timeout=6, env=env)
+                    subprocess.run(
+                        ['bash', '-lc', prefix + f'ros2 lifecycle set /{name} activate'],
+                        capture_output=True, text=True, timeout=8, env=env)
+                except Exception:
+                    pass
+            elif 'inactive' in out:
+                pending = True
+                try:
+                    subprocess.run(
+                        ['bash', '-lc', prefix + f'ros2 lifecycle set /{name} activate'],
+                        capture_output=True, text=True, timeout=8, env=env)
+                except Exception:
+                    pass
+            elif 'active' not in out:
+                pending = True
+        if not pending:
+            break
+        time.sleep(1.2)
 
 
 def restart_rosbridge():
@@ -1248,22 +1472,117 @@ class WebOpsNode(Node):
         self.sub_stop_nav2 = self.create_subscription(Empty, '/web/stop_nav2', self.cb_stop_nav2, 10)
         self.sub_mapping = self.create_subscription(Empty, '/web/mapping', self.cb_mapping, 10)
 
-        self.pub_nav_status = self.create_publisher(String, '/web/nav_status', 10)
+        # TRANSIENT_LOCAL：重定位节点晚订阅也能拿到当前导航状态，避免导航中误触发重搜
+        _nav_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1)
+        self.pub_nav_status = self.create_publisher(String, '/web/nav_status', _nav_qos)
         self.pub_sys_status = self.create_publisher(String, '/web/sys_status', 10)
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pub_init = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
         # 网页 TFClient 常拿不到 map→base_link；这里查 TF 后转发给前端画激光
         self.pub_robot_pose = self.create_publisher(PoseStamped, '/web/robot_pose', 10)
+        # 把 /scan 按「激光时间戳」转到 map，前端直接画 map 系红点，避免箭头位姿与激光不同步导致一走就漂
+        self.pub_scan_map = self.create_publisher(Float32MultiArray, '/web/scan_map', 10)
         self._tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self._tf_listener = TransformListener(self._tf_buffer, self)
+        self.create_subscription(
+            LaserScan, '/scan', self.cb_scan_to_map, qos_profile_sensor_data)
+        # /map 是 map_server 一次性 TRANSIENT_LOCAL 发布的；rosbridge 对任意话题固定
+        # 用 BEST_EFFORT/VOLATILE 订阅（这里这版 roslib.min.js 也不支持传 QoS 覆盖），
+        # 只要浏览器这边的 rosbridge 订阅是在那一次性发布*之后*才建立的——WiFi 掉线
+        # 重连、或者页面比 Nav2 启动得晚——就永远收不到，网页上"导航加载不出地图"。
+        # 用正确匹配的 QoS 在后端订阅一次缓存下来，配 /api/nav2/map 走 HTTP 一次性
+        # 拉取，不依赖 rosbridge 的订阅时序。
+        self._last_map = None
+        self.create_subscription(
+            OccupancyGrid, '/map', self.cb_map,
+            QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       history=HistoryPolicy.KEEP_LAST, depth=1))
 
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.nav_goal_handle = None
+        self._nav_goal_token = 0  # 递增；旧 goal 的 cancel/result 回调不得覆盖新状态
         self.nav_state = 'idle'
+        # 未对齐禁止下发 Nav2 目标（AMCL set_initial_pose=(0,0) 只为起 lifecycle，不是真定位）
+        self._loc_aligned = False
+        # cb_status_timer 用：heal_nav_deps() 挪到后台线程跑，这把锁保证同一时刻只有一条在跑
+        self._heal_lock = threading.Lock()
+        self._loc_user_accepted = False  # 用户点过「接受位姿」/手动设姿
+        self._loc_hit = 0.0
+        self.sub_reloc_status = self.create_subscription(
+            String, '/relocalize_status', self.cb_reloc_status, 10)
 
         self.create_timer(1.0, self.cb_status_timer)
         self.create_timer(0.1, self.cb_robot_pose_timer)
         self._set_nav_status('idle', '')
+
+    def cb_reloc_status(self, msg):
+        s = (msg.data or '').strip()
+        hit = 0.0
+        if ':' in s:
+            try:
+                hit = float(s.split(':', 1)[1])
+            except Exception:
+                hit = 0.0
+        self._loc_hit = hit
+        base = s.split(':', 1)[0]
+        # 重新盲搜 / 明确要求手动 → 清掉用户确认
+        if base in ('searching', 'waiting_amcl', 'need_manual', 'need_init', 'failed', 'critical'):
+            self._loc_user_accepted = False
+        # 允许导航：命中≥60% 的 aligned/hold，或用户已确认当前位姿
+        if base in ('aligned', 'hold') and hit >= 0.59:
+            self._loc_aligned = True
+        elif self._loc_user_accepted:
+            self._loc_aligned = True
+        else:
+            self._loc_aligned = False
+
+    def cb_map(self, msg: OccupancyGrid):
+        self._last_map = msg
+
+    def cb_scan_to_map(self, scan: LaserScan):
+        """Project LaserScan into map frame at the scan stamp (not latest pose)."""
+        if not proc_alive('component_container_isolated'):
+            return
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                'map', scan.header.frame_id,
+                Time.from_msg(scan.header.stamp),
+                timeout=Duration(seconds=0.05))
+        except Exception:
+            try:
+                tf = self._tf_buffer.lookup_transform(
+                    'map', scan.header.frame_id, Time(),
+                    timeout=Duration(seconds=0.02))
+            except Exception:
+                return
+        q = tf.transform.rotation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        c, s = math.cos(yaw), math.sin(yaw)
+        bx = tf.transform.translation.x
+        by = tf.transform.translation.y
+        pts = []
+        a = scan.angle_min
+        rmin = scan.range_min or 0.05
+        rmax = scan.range_max or 30.0
+        for r in scan.ranges:
+            if math.isfinite(r) and rmin < r < rmax:
+                lx = r * math.cos(a)
+                ly = r * math.sin(a)
+                pts.append(bx + lx * c - ly * s)
+                pts.append(by + lx * s + ly * c)
+            a += scan.angle_increment
+        if len(pts) < 8:
+            return
+        msg = Float32MultiArray()
+        msg.data = pts
+        self.pub_scan_map.publish(msg)
 
     def cb_robot_pose_timer(self):
         """Republish map→base_footprint for the web console (scan overlay + dog arrow).
@@ -1300,6 +1619,17 @@ class WebOpsNode(Node):
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
             self._set_nav_status('aborted', 'nav2_server_unavailable')
             return
+        # 先取消旧目标；用 token 忽略旧 result，避免把新导航刷成 canceled
+        self._nav_goal_token += 1
+        send_token = self._nav_goal_token
+        old = self.nav_goal_handle
+        self.nav_goal_handle = None
+        if old is not None:
+            try:
+                old.cancel_goal_async()
+            except Exception:
+                pass
+            time.sleep(0.25)
         goal = NavigateToPose.Goal()
         goal.pose.header.frame_id = 'map'
         goal.pose.header.stamp = self.get_clock().now().to_msg()
@@ -1308,19 +1638,34 @@ class WebOpsNode(Node):
         goal.pose.pose.orientation = Quaternion(
             x=0.0, y=0.0, z=math.sin(yaw / 2.0), w=math.cos(yaw / 2.0))
         f = self.nav_client.send_goal_async(goal)
-        f.add_done_callback(self._goal_sent_cb)
+        f.add_done_callback(lambda fut, tok=send_token: self._goal_sent_cb(fut, tok))
 
-    def _goal_sent_cb(self, future):
-        h = future.result()
-        if not h.accepted:
+    def _goal_sent_cb(self, future, token):
+        if token != self._nav_goal_token:
+            return
+        try:
+            h = future.result()
+        except Exception as e:
+            self._set_nav_status('aborted', f'goal_send_{e}')
+            return
+        if h is None or not h.accepted:
             self._set_nav_status('aborted', 'goal_rejected')
             return
         self.nav_goal_handle = h
         self._set_nav_status('navigating', '')
-        h.get_result_async().add_done_callback(self._goal_result_cb)
+        h.get_result_async().add_done_callback(
+            lambda fut, tok=token, handle=h: self._goal_result_cb(fut, tok, handle))
 
-    def _goal_result_cb(self, future):
-        st = future.result().status
+    def _goal_result_cb(self, future, token, handle):
+        # 已被更新的目标 / 替换发送：丢弃过期回调
+        if token != self._nav_goal_token or self.nav_goal_handle is not handle:
+            return
+        try:
+            st = future.result().status
+        except Exception as e:
+            self._set_nav_status('aborted', f'result_{e}')
+            self.nav_goal_handle = None
+            return
         # GoalStatus: SUCCEEDED=4, CANCELED=5, ABORTED=6 (action_msgs)
         if st == 4:
             self._set_nav_status('reached', '')
@@ -1331,8 +1676,14 @@ class WebOpsNode(Node):
         self.nav_goal_handle = None
 
     def cb_nav_cancel(self, msg):
+        self._nav_goal_token += 1
         if self.nav_goal_handle is not None:
-            self.nav_goal_handle.cancel_goal_async()
+            try:
+                self.nav_goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            self.nav_goal_handle = None
+            self._set_nav_status('canceled', '')
         else:
             self._set_nav_status('canceled', 'no_active_goal')
         self._publish_zero()
@@ -1350,7 +1701,9 @@ class WebOpsNode(Node):
         self.get_logger().info(f'init_pose ({x:.2f}, {y:.2f}, yaw {math.degrees(yaw):.0f}deg)')
         pose = PoseWithCovarianceStamped()
         pose.header.frame_id = 'map'
-        pose.header.stamp = self.get_clock().now().to_msg()
+        # stamp=0 → AMCL 用最新 TF
+        pose.header.stamp.sec = 0
+        pose.header.stamp.nanosec = 0
         pose.pose.pose.position.x = float(x)
         pose.pose.pose.position.y = float(y)
         pose.pose.pose.orientation = Quaternion(
@@ -1358,8 +1711,11 @@ class WebOpsNode(Node):
         pose.pose.covariance[0] = 0.25
         pose.pose.covariance[7] = 0.25
         pose.pose.covariance[35] = 0.25
-        for _ in range(1):  # 只发一次；重定位节点会 ICP，连发会打三次
-            self.pub_init.publish(pose)
+        self.pub_init.publish(pose)
+        # 用户拖了初始位姿 = 认可当前对齐，允许下目标
+        self._loc_user_accepted = True
+        self._loc_aligned = True
+        self._loc_hit = max(self._loc_hit, 0.60)
 
     def cb_mapping(self, msg):
         if not proc_alive('fastlio_mapping'):
@@ -1376,20 +1732,48 @@ class WebOpsNode(Node):
         self.get_logger().info('start nav2 (ROS trigger)')
         # Prefer live map; start_nav2 resolves missing names itself
         start_nav2({'map': 'map_live.yaml'})
+        # 启导航时清掉上次卡死的 navigating（无 goal handle）
+        self.nav_goal_handle = None
+        self._nav_goal_token += 1
+        self._set_nav_status('idle', 'nav2_started')
 
     def cb_stop_nav2(self, msg):
         stop_nav2_api()
         self._publish_zero()
+        self.nav_goal_handle = None
+        self._nav_goal_token += 1
         self._set_nav_status('idle', 'nav2_stopped')
 
     def cb_status_timer(self):
-        try:
-            heal_nav_deps()
-        except Exception:
-            pass
+        # heal_nav_deps() 内部（ensure_localization_stack/ensure_scan_node/
+        # ensure_auto_relocalize）本来就是设计成阻塞轮询、最长能堵 10+ 秒——
+        # 这些函数也被 /api/relocalize、/api/nav2/start 等 HTTP 接口直接同步
+        # 调用，那些地方就是要等到准确结果，不能改成非阻塞。
+        # 但这里是 1Hz ROS 定时器回调，rclpy 默认单线程 executor：直接同步调用
+        # heal_nav_deps() 会把这条回调，连带 /web/sys_status 的周期发布和
+        # cb_nav_cmd（导航目标）等其它订阅回调，一起卡住最长 10+ 秒。
+        # 2026-09-28 实测：fastlio_mapping 内存涨到 4GB+ 被 OOM 杀掉后，
+        # heal_nav_deps 反复触发这段阻塞重启轮询，其间 /web/nav_cmd 收不到——
+        # 这就是「导航页设了目标机器人不走」的根因之一。
+        # 挪到后台线程跑，_heal_lock 保证同一时刻只有一条在跑，不重叠。
+        if self._heal_lock.acquire(blocking=False):
+            def _heal():
+                try:
+                    heal_nav_deps()
+                except Exception:
+                    pass
+                finally:
+                    self._heal_lock.release()
+            threading.Thread(target=_heal, daemon=True).start()
+        # Nav2 挂了 / 无活动 goal 时不要一直刷 navigating，否则网页以为还在导
+        if self.nav_state == 'navigating' and self.nav_goal_handle is None:
+            if not self.nav_client.server_is_ready():
+                self._set_nav_status('idle', 'nav2_gone')
         status = service_status()
         status['nav'] = self.nav_state
         self.pub_sys_status.publish(String(data=json.dumps(status)))
+        # 周期性重发导航状态（配合 TRANSIENT_LOCAL），防止 reloc 漏订阅
+        self._set_nav_status(self.nav_state, '')
 
     def _set_nav_status(self, state, detail):
         self.nav_state = state
@@ -1398,8 +1782,10 @@ class WebOpsNode(Node):
 
 
 def main(args=None):
+    global _web_ops_node
     rclpy.init(args=args)
     node = WebOpsNode()
+    _web_ops_node = node
     server = ThreadingHTTPServer(('0.0.0.0', 8090), ApiHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()

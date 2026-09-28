@@ -1,58 +1,68 @@
 /*
- * auto_relocalize: 基于激光扫描匹配的自动重定位(移植自 wheeltec_fastlio 的全局
- * 似然场搜索方案, 替换掉旧版"必须先给种子位姿再做局部 ICP 精修"的实现)。
+ * auto_relocalize: 双σ似然场粗搜+精搜，按「定位置信度(黑点命中)」取最高位姿。
  *
- * 原理: 对 2D 栅格地图的障碍物做距离变换得到似然场, 把当前 /scan 的激光末端点
- * 在整张地图的 (x, y, yaw) 三维空间做粗到精的全局搜索打分, 取最优位姿发布到
- * /initialpose, 由 AMCL 接管后续跟踪定位。不需要用户先点一次大致位置。
- *
- * 功能:
- *   1. 启动自动重定位: Nav2/AMCL 起来后自动跑一次全局搜索, 无需手动"设初始位姿"
- *   2. 手动触发: ros2 service call /relocalize std_srvs/srv/Trigger
- *      (网页"手动重定位"按钮用这个 —— 仅当自动重定位效果不好时才需要)
- *   3. 绑架/漂移检测看门狗(默认开): 周期用当前激光给 AMCL 位姿打分, 分数持续
- *      过低(狗被抱走/定位跟丢)时自动触发全局重定位
- *   4. watchdog_en 可在运行期通过 ros2 param set 实时切换("自动重定位模式"/
- *      "里程计模式"), 网页两个按钮切换时调这个, 不需要重启导航
+ * 状态机:
+ *   1. 启动/手动重定位: 粗搜(宽σ辅助) → 精搜(窄σ辅助) → 发布最高置信度位姿
+ *   2. ≥0.60 → locked(aligned)，进入看门狗
+ *   3. 0.35~0.60 → mid_wait：只监测置信度；15s 仍不到 0.60 → ask_manual
+ *      ask_manual: 网页弹窗——否=承认当前位姿并锁定；是=用户手动设姿后锁定
+ *   4. locked 后: ≥0.60 健康；0.35~0.60 只更新置信度不重搜；
+ *      <0.35 连续 N 次 → 再全图重定位，发布最高置信度位姿，回到 2/3
+ *   5. 导航结束(reached/canceled/…)后停稳：若置信度 < post_nav_hit → 自动搜一次
  */
 #include <cmath>
+#include <cstdio>
 #include <vector>
 #include <thread>
 #include <atomic>
 #include <algorithm>
 #include <mutex>
+#include <chrono>
+#include <string>
 
 #include <rclcpp/rclcpp.hpp>
-#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
 struct Candidate {
   double x = 0, y = 0, yaw = 0;
-  double score = -1.0;
+  double score = -1.0;     // 似然场分(粗=宽σ / 精=窄σ)，仅并列打破
+  double black_hit = 0.0;  // 定位置信度：主排序 + 门槛
+  double tight = 0.0;
+};
+
+enum class Phase {
+  Boot,       // 等地图/激光/AMCL
+  Searching,  // 正在全图搜
+  MidWait,    // 首轮/重搜后置信度在 [trigger, success)
+  AskManual,  // 已提示用户是否手动设姿
+  Locked      // 定位就绪，看门狗监测
 };
 
 class AutoRelocalize : public rclcpp::Node {
 public:
   AutoRelocalize() : Node("auto_relocalize") {
     auto_on_startup_ = declare_parameter<bool>("auto_on_startup", true);
-    accept_score_ = declare_parameter<double>("accept_score", 0.55);
-    sigma_ = declare_parameter<double>("sigma", 0.25);            // 似然场高斯宽度 m
-    coarse_step_ = declare_parameter<double>("coarse_step", 0.2); // 粗搜位置步长 m
-    coarse_yaw_step_ = declare_parameter<double>("coarse_yaw_step_deg", 10.0) * M_PI / 180.0;
+    accept_score_ = declare_parameter<double>("accept_score", 0.40);
+    min_black_hit_ = declare_parameter<double>("min_black_hit", 0.60);
+    reloc_trigger_hit_ = declare_parameter<double>("reloc_trigger_hit", 0.35);
+    mid_wait_sec_ = declare_parameter<double>("mid_wait_sec", 15.0);
+    reloc_cooldown_sec_ = declare_parameter<double>("reloc_cooldown_sec", 45.0);
+    sigma_ = declare_parameter<double>("sigma", 0.25);
+    coarse_step_ = declare_parameter<double>("coarse_step", 0.15);
+    coarse_yaw_step_ = declare_parameter<double>("coarse_yaw_step_deg", 5.0) * M_PI / 180.0;
     max_beam_range_ = declare_parameter<double>("max_beam_range", 8.0);
-    min_clearance_ = declare_parameter<double>("min_clearance", 0.12); // 候选位置离障碍最小距离
+    min_clearance_ = declare_parameter<double>("min_clearance", 0.12);
     watchdog_en_ = declare_parameter<bool>("watchdog_en", true);
-    // 看门狗用独立的窄高斯(σ=watchdog_sigma)严格打分: 宽高斯(sigma=0.25)是给
-    // 全局搜索用的, 在障碍密集地图上错误位姿也能蒙到0.7分, 无法区分对错;
-    // 窄高斯下激光点偏20cm几乎0分 → 正确位姿0.6~0.8, 被搬动后0.1~0.2。
     watchdog_sigma_ = declare_parameter<double>("watchdog_sigma", 0.08);
-    watchdog_score_ = declare_parameter<double>("watchdog_score", 0.45);
-    watchdog_count_ = declare_parameter<int>("watchdog_count", 3);
+    watchdog_count_ = std::max(1, (int)declare_parameter<int>("watchdog_count", 3));
+    post_nav_hit_ = declare_parameter<double>("post_nav_hit", 0.55);
+    post_nav_settle_sec_ = declare_parameter<double>("post_nav_settle_sec", 1.5);
     num_threads_ = std::max(1, (int)declare_parameter<int>("num_threads", 4));
 
     map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -64,110 +74,249 @@ public:
           std::lock_guard<std::mutex> lk(scan_mutex_);
           scan_ = msg;
         });
+    // 导航进行中禁止自动重定位（发 /initialpose 会打乱 AMCL → Failed to make progress）
+    // TRANSIENT_LOCAL：对齐 web_ops，晚启动也能拿到当前状态
+    nav_status_sub_ = create_subscription<std_msgs::msg::String>(
+        "/web/nav_status", rclcpp::QoS(1).transient_local().reliable(),
+        [this](std_msgs::msg::String::ConstSharedPtr msg) {
+          const std::string s = msg->data.empty() ? "" : msg->data;
+          const auto colon = s.find(':');
+          const std::string st = colon == std::string::npos ? s : s.substr(0, colon);
+          const bool now_nav = (st == "navigating" || st == "active");
+          // 导航刚结束：稍后再测置信度，偏低则自动纠偏（导航中绝不发 /initialpose）
+          if (navigating_ && !now_nav &&
+              (st == "reached" || st == "canceled" || st == "aborted" || st == "idle")) {
+            post_nav_pending_ = true;
+            post_nav_ready_at_ = now() + rclcpp::Duration::from_seconds(post_nav_settle_sec_);
+          }
+          navigating_ = now_nav;
+          if (now_nav) post_nav_pending_ = false;
+        });
     pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
         "/initialpose", 10);
+    status_pub_ = create_publisher<std_msgs::msg::String>("/relocalize_status", 10);
+
     srv_ = create_service<std_srvs::srv::Trigger>(
         "relocalize",
         [this](std_srvs::srv::Trigger::Request::ConstSharedPtr,
                std_srvs::srv::Trigger::Response::SharedPtr res) {
           Candidate c;
-          bool ok = relocalize(c, true);
-          res->success = ok;
-          res->message = ok ? "重定位成功 score=" + std::to_string(c.score)
-                            : "重定位失败(匹配分过低) best=" + std::to_string(c.score);
-          if (ok && pose_pub_->get_subscription_count() == 0) {
-            res->message += " [警告: /initialpose 无订阅者, AMCL可能未激活]";
-          }
+          bool ok = runRelocalize(c, true);
+          res->success = true;
+          char buf[160];
+          std::snprintf(buf, sizeof(buf),
+              "已发布最高置信度位姿 黑点命中=%.1f%% %s",
+              c.black_hit * 100.0,
+              c.black_hit >= min_black_hit_ ? "aligned" :
+              (c.black_hit >= reloc_trigger_hit_ ? "mid" : "weak"));
+          res->message = buf;
+          if (!ok) res->message += " [搜索未执行]";
+          if (pose_pub_->get_subscription_count() == 0)
+            res->message += " [警告: /initialpose 无订阅者]";
         });
-    // 看门狗定时器/TF 无条件创建, 是否真正打分重定位由运行期的 watchdog_en_ 决定
-    // (这样网页可以在"里程计模式/自动重定位模式"之间实时切换, 无需重启导航)
+
+    // 用户在弹窗选「否」或手动设姿完成后调用 → 锁定当前位姿
+    accept_srv_ = create_service<std_srvs::srv::Trigger>(
+        "accept_reloc_pose",
+        [this](std_srvs::srv::Trigger::Request::ConstSharedPtr,
+               std_srvs::srv::Trigger::Response::SharedPtr res) {
+          phase_ = Phase::Locked;
+          ask_manual_shown_ = false;
+          low_score_cnt_ = 0;
+          publishStatusHit("aligned", last_hit_);
+          res->success = true;
+          res->message = "已承认当前位姿，进入定位就绪/看门狗";
+          RCLCPP_INFO(get_logger(), "用户确认位姿，锁定 (置信度=%.1f%%)", last_hit_ * 100.0);
+        });
+
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
-    watchdog_timer_ = create_wall_timer(std::chrono::seconds(2),
-                                        [this]() { watchdogCheck(); });
-    // 允许运行期通过 SetParameters 改看门狗行为 (里程计模式 = watchdog_en:false)
-    param_cb_handle_ = add_on_set_parameters_callback(
-        [this](const std::vector<rclcpp::Parameter> &ps) {
-          rcl_interfaces::msg::SetParametersResult r; r.successful = true;
-          for (const auto &p : ps) {
-            if (p.get_name() == "watchdog_en") watchdog_en_ = p.as_bool();
-            else if (p.get_name() == "watchdog_score") watchdog_score_ = p.as_double();
-            else if (p.get_name() == "watchdog_count") watchdog_count_ = (int)p.as_int();
-          }
-          RCLCPP_INFO(get_logger(), "重定位模式更新: 自动重定位看门狗=%s (score<%.2f 连续%d次)",
-                      watchdog_en_ ? "开" : "关", watchdog_score_, watchdog_count_);
-          return r;
-        });
-    startup_timer_ = create_wall_timer(std::chrono::seconds(2), [this]() {
-      if (!auto_on_startup_ || startup_done_) return;
-      if (!field_ready_ || !haveScan()) return;
-      // 等 AMCL 的 initialpose 订阅就位再发, 否则位姿发了也没人收
-      if (pose_pub_->get_subscription_count() == 0) {
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000,
-            "等待 AMCL 订阅 /initialpose ...");
-        return;
-      }
-      Candidate c;
-      if (relocalize(c, false)) {
-        startup_done_ = true;
-        startup_timer_->cancel();
-      } else if (++startup_tries_ >= 5) {
-        RCLCPP_ERROR(get_logger(),
-            "启动自动重定位失败(尝试5次, 最高分 %.2f), 请在网页用\"设初始位姿\"手动定位, "
-            "或把狗挪到特征更多的位置后调用 /relocalize 服务", c.score);
-        startup_done_ = true;
-        startup_timer_->cancel();
-      }
-    });
-    RCLCPP_INFO(get_logger(), "自动重定位节点就绪 (启动自动定位: %s, 看门狗: %s)",
-                auto_on_startup_ ? "开" : "关", watchdog_en_ ? "开" : "关");
+
+    watchdog_timer_ = create_wall_timer(std::chrono::seconds(1),
+                                        [this]() { tick(); });
+    publishStatus(watchdog_en_ ? "hold:0.000" : "need_manual");
+    RCLCPP_INFO(get_logger(),
+        "重定位就绪: 手动「重定位」始终可用; auto_on_startup=%s watchdog=%s post_nav<%.0f%%",
+        auto_on_startup_ ? "on" : "off", watchdog_en_ ? "on" : "off",
+        post_nav_hit_ * 100.0);
+  }
+
+  void publishStatus(const std::string &s) {
+    std_msgs::msg::String m;
+    m.data = s;
+    status_pub_->publish(m);
+  }
+  void publishStatusHit(const std::string &tag, double hit) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s:%.3f", tag.c_str(), hit);
+    publishStatus(buf);
   }
 
 private:
-  // ---------- 绑架检测看门狗 ----------
-  // 用当前激光给 AMCL 位姿(TF map->base_footprint)打分:
-  // 狗被抱走/挪动后 AMCL 仍自信地输出旧位姿, 但激光和地图对不上, 分数会骤降
-  void watchdogCheck() {
-    if (!watchdog_en_) return;   // 里程计模式: 不自动重定位, 侧重里程计(手动重定位仍可用)
-    if (!field_ready_ || !haveScan() || !startup_done_) return;
-    if ((now() - last_reloc_time_).seconds() < 15.0) return;  // 冷却期
+  void tick() {
+    if (!field_ready_ || !haveScan()) return;
+    if (phase_ == Phase::Searching) return;
+
+    // 启动自动搜：仅 auto_on_startup=true 时执行一次
+    if (phase_ == Phase::Boot) {
+      if (auto_on_startup_) {
+        if (pose_pub_->get_subscription_count() == 0) {
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000,
+              "等待 AMCL 订阅 /initialpose ...");
+          publishStatus("waiting_amcl");
+          return;
+        }
+        Candidate c;
+        runRelocalize(c, false);
+        return;
+      }
+      // 手动模式：离开 Boot，只报置信度，绝不自动搜
+      phase_ = Phase::Locked;
+      publishStatus("need_manual");
+    }
+
+    // 始终更新定位置信度显示；只有 watchdog_en 才允许自动重搜
+    double bh = 0.0;
+    const bool have = currentHit(bh);
+    if (have) {
+      last_hit_ = bh;
+      if (bh >= min_black_hit_) publishStatusHit("aligned", bh);
+      else if (bh >= reloc_trigger_hit_) publishStatusHit("hold", bh);
+      else publishStatusHit("critical", bh);
+    } else {
+      publishStatusHit("critical", last_hit_);
+    }
+
+    if (!watchdog_en_) return;  // 手动模式：到此为止，不自动发 /initialpose
+    if (navigating_) {
+      low_score_cnt_ = 0;
+      post_nav_pending_ = false;
+      return;
+    }
+
+    // 导航结束后停稳：置信度仍偏低 → 自动全图搜一次（不受 45s cooldown 限制）
+    if (post_nav_pending_ && now() >= post_nav_ready_at_) {
+      post_nav_pending_ = false;
+      double bh_post = have ? bh : last_hit_;
+      if (!have) currentHit(bh_post);
+      if (bh_post < post_nav_hit_ && phase_ != Phase::Searching) {
+        RCLCPP_WARN(get_logger(),
+            "导航结束置信度 %.1f%% <%.0f%%，自动纠偏",
+            bh_post * 100.0, post_nav_hit_ * 100.0);
+        Candidate c;
+        runRelocalize(c, false);
+        return;
+      }
+    }
+
+    if (!have) {
+      if (phase_ == Phase::Locked) {
+        if ((now() - last_reloc_time_).seconds() < reloc_cooldown_sec_) return;
+        if (++low_score_cnt_ >= watchdog_count_) {
+          low_score_cnt_ = 0;
+          RCLCPP_WARN(get_logger(), "无 map→base_footprint，触发全局重定位");
+          Candidate c;
+          runRelocalize(c, false);
+        }
+      }
+      return;
+    }
+
+    if (phase_ == Phase::MidWait) {
+      if (bh >= min_black_hit_) {
+        phase_ = Phase::Locked;
+        low_score_cnt_ = 0;
+        publishStatusHit("aligned", bh);
+        return;
+      }
+      if (bh < reloc_trigger_hit_) {
+        phase_ = Phase::AskManual;
+        ask_manual_shown_ = false;
+        publishStatusHit("ask_manual", bh);
+        return;
+      }
+      publishStatusHit("hold", bh);
+      if ((now() - mid_wait_start_).seconds() >= mid_wait_sec_) {
+        phase_ = Phase::AskManual;
+        ask_manual_shown_ = false;
+        publishStatusHit("ask_manual", bh);
+      }
+      return;
+    }
+
+    if (phase_ == Phase::AskManual) {
+      if (bh >= min_black_hit_) {
+        phase_ = Phase::Locked;
+        publishStatusHit("aligned", bh);
+      } else {
+        publishStatusHit("ask_manual", bh);
+      }
+      return;
+    }
+
+    if (phase_ == Phase::Locked) {
+      if (bh >= reloc_trigger_hit_) {
+        low_score_cnt_ = 0;
+        return;
+      }
+      if ((now() - last_reloc_time_).seconds() < reloc_cooldown_sec_) return;
+      if (++low_score_cnt_ >= watchdog_count_) {
+        low_score_cnt_ = 0;
+        RCLCPP_WARN(get_logger(),
+            "置信度 %.1f%% <%.0f%% 连续%d次，触发全局重定位",
+            bh * 100.0, reloc_trigger_hit_ * 100.0, watchdog_count_);
+        Candidate c;
+        runRelocalize(c, false);
+      }
+    }
+  }
+
+  bool currentHit(double &bh) {
     geometry_msgs::msg::TransformStamped tf;
     try {
       tf = tf_buffer_->lookupTransform("map", "base_footprint", tf2::TimePointZero);
     } catch (const tf2::TransformException &) {
-      return;  // AMCL尚未输出定位
+      return false;
     }
     const auto &q = tf.transform.rotation;
     const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
                                   1.0 - 2.0 * (q.y * q.y + q.z * q.z));
     const auto pts = beams(600);
-    if (pts.size() < 30) return;
-    const double sc = scorePoseField(pts, tf.transform.translation.x,
-                                     tf.transform.translation.y,
-                                     std::cos(yaw), std::sin(yaw), score_tight_);
-    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 30000,
-                         "定位健康度(严格分): %.2f (低于%.2f连续%d次触发重定位)",
-                         sc, watchdog_score_, watchdog_count_);
-    if (sc < watchdog_score_) {
-      if (++low_score_cnt_ >= watchdog_count_) {
-        RCLCPP_WARN(get_logger(),
-            "当前位姿匹配分连续过低(%.2f < %.2f), 判定定位丢失(狗可能被移动), 触发全局重定位",
-            sc, watchdog_score_);
-        low_score_cnt_ = 0;
-        Candidate c;
-        relocalize(c, false);
-      }
+    if (pts.size() < 30) return false;
+    bh = blackHitRatio(pts, tf.transform.translation.x, tf.transform.translation.y,
+                       std::cos(yaw), std::sin(yaw));
+    return true;
+  }
+
+  void enterAfterReloc(double hit) {
+    last_hit_ = hit;
+    low_score_cnt_ = 0;
+    ask_manual_shown_ = false;
+    if (hit >= min_black_hit_) {
+      phase_ = Phase::Locked;
+      publishStatusHit("aligned", hit);
+      RCLCPP_INFO(get_logger(), "重定位成功(≥%.0f%%)，进入看门狗", min_black_hit_ * 100.0);
+    } else if (hit >= reloc_trigger_hit_) {
+      phase_ = Phase::MidWait;
+      mid_wait_start_ = now();
+      publishStatusHit("hold", hit);
+      RCLCPP_WARN(get_logger(),
+          "置信度 %.1f%% 在[%.0f%%,%.0f%%)，监测 %.0fs；到期未达标则请用户确认",
+          hit * 100.0, reloc_trigger_hit_ * 100.0, min_black_hit_ * 100.0, mid_wait_sec_);
     } else {
-      low_score_cnt_ = 0;
+      // 首轮就 <0.35：已发最高位姿，直接请用户确认（再搜意义不大除非环境变了）
+      phase_ = Phase::AskManual;
+      publishStatusHit("ask_manual", hit);
+      RCLCPP_WARN(get_logger(),
+          "置信度 %.1f%% <%.0f%%，请用户确认是否手动设姿（或再点重定位）",
+          hit * 100.0, reloc_trigger_hit_ * 100.0);
     }
   }
 
-  // ---------- 地图与似然场 ----------
   void onMap(nav_msgs::msg::OccupancyGrid::ConstSharedPtr msg) {
     map_ = msg;
     const int w = msg->info.width, h = msg->info.height;
     const float res = msg->info.resolution;
-    // 距离变换 (两遍 chamfer)
     const float INF = 1e9f;
     dist_.assign((size_t)w * h, INF);
     for (int i = 0; i < w * h; ++i)
@@ -189,7 +338,6 @@ private:
         if (x < w - 1 && y < h - 1) d = std::min(d, dist_[(size_t)(y + 1) * w + x + 1] + diag);
         if (x > 0 && y < h - 1) d = std::min(d, dist_[(size_t)(y + 1) * w + x - 1] + diag);
       }
-    // 似然场: 宽高斯给全局搜索, 窄高斯给看门狗健康检查
     score_.resize(dist_.size());
     score_tight_.resize(dist_.size());
     const float inv2s2 = 1.0f / (2.0f * sigma_ * sigma_);
@@ -199,7 +347,7 @@ private:
       score_tight_[i] = std::exp(-dist_[i] * dist_[i] * inv2s2t);
     }
     field_ready_ = true;
-    RCLCPP_INFO(get_logger(), "似然场就绪 %dx%d", w, h);
+    RCLCPP_INFO(get_logger(), "双σ似然场就绪 %dx%d (σ=%.2f / %.2f)", w, h, sigma_, watchdog_sigma_);
   }
 
   bool haveScan() {
@@ -207,7 +355,6 @@ private:
     return scan_ != nullptr;
   }
 
-  // 从scan提取激光末端点(载体坐标系), 均匀抽取 n 束
   std::vector<std::pair<float, float>> beams(int n) {
     sensor_msgs::msg::LaserScan::ConstSharedPtr scan;
     {
@@ -227,16 +374,27 @@ private:
     return pts;
   }
 
-  // 单个位姿打分: 激光末端点落在似然场上的平均分。
-  //
-  // 关键: 落在「灰色未知区」的点不能算分——距离变换是纯几何算的，不管这格子
-  // 有没有被真正探索过，未知区离很远处的一堵墙可能"几何上很近"但那不代表
-  // 这里真的贴着墙。之前没做这个过滤，会出现"红色激光点飘在灰色未知区、
-  // 离黑色障碍物一大截，但打分还很高"的假成功（用户实测截图证实）。
-  // 现在未知区和图外一样按 0 分记（仍计入分母），逼着算法只信"已探索"的格子。
+  inline double blackHitRatio(const std::vector<std::pair<float, float>> &pts,
+                              double x, double y, double c, double s) const {
+    if (!map_ || pts.empty()) return 0.0;
+    const auto &info = map_->info;
+    const int w = info.width, h = info.height;
+    int hits = 0;
+    for (const auto &p : pts) {
+      const double wx = x + c * p.first - s * p.second;
+      const double wy = y + s * p.first + c * p.second;
+      const int gx = (int)((wx - info.origin.position.x) / info.resolution);
+      const int gy = (int)((wy - info.origin.position.y) / info.resolution);
+      if (gx < 0 || gx >= w || gy < 0 || gy >= h) continue;
+      if (map_->data[(size_t)gy * w + gx] >= 65) ++hits;
+    }
+    return (double)hits / (double)pts.size();
+  }
+
   inline double scorePoseField(const std::vector<std::pair<float, float>> &pts,
                                double x, double y, double c, double s,
                                const std::vector<float> &field) const {
+    if (!map_ || pts.empty() || field.empty()) return 0.0;
     const auto &info = map_->info;
     const int w = info.width, h = info.height;
     double sum = 0;
@@ -245,23 +403,24 @@ private:
       const double wy = y + s * p.first + c * p.second;
       const int gx = (int)((wx - info.origin.position.x) / info.resolution);
       const int gy = (int)((wy - info.origin.position.y) / info.resolution);
-      if (gx < 0 || gx >= w || gy < 0 || gy >= h) continue;  // 图外记0分
+      if (gx < 0 || gx >= w || gy < 0 || gy >= h) continue;
       const size_t idx = (size_t)gy * w + gx;
-      if (map_->data[idx] < 0) continue;  // 未知区记0分——不能拿"看不见"当匹配
+      if (map_->data[idx] < 0) continue;
       sum += field[idx];
     }
-    return pts.empty() ? 0.0 : sum / pts.size();
+    return sum / (double)pts.size();
   }
 
-  inline double scorePose(const std::vector<std::pair<float, float>> &pts,
-                          double x, double y, double c, double s) const {
-    return scorePoseField(pts, x, y, c, s, score_);
+  // 主指标：置信度；并列用似然场
+  static bool better(const Candidate &a, const Candidate &b) {
+    if (a.black_hit != b.black_hit) return a.black_hit > b.black_hit;
+    return a.score > b.score;
   }
 
-  // 在给定候选位置集合 × 角度集合中并行搜索最优
   Candidate search(const std::vector<std::pair<double, double>> &positions,
                    const std::vector<double> &yaws,
-                   const std::vector<std::pair<float, float>> &pts) {
+                   const std::vector<std::pair<float, float>> &pts,
+                   const std::vector<float> &field) {
     std::vector<Candidate> best(num_threads_);
     std::vector<std::thread> workers;
     std::atomic<size_t> next{0};
@@ -271,9 +430,12 @@ private:
         while ((i = next.fetch_add(1)) < positions.size()) {
           const auto &pos = positions[i];
           for (double yaw : yaws) {
-            const double sc = scorePose(pts, pos.first, pos.second,
-                                        std::cos(yaw), std::sin(yaw));
-            if (sc > best[t].score) best[t] = {pos.first, pos.second, yaw, sc};
+            const double c = std::cos(yaw), s = std::sin(yaw);
+            Candidate cand;
+            cand.x = pos.first; cand.y = pos.second; cand.yaw = yaw;
+            cand.black_hit = blackHitRatio(pts, cand.x, cand.y, c, s);
+            cand.score = scorePoseField(pts, cand.x, cand.y, c, s, field);
+            if (better(cand, best[t])) best[t] = cand;
           }
         }
       });
@@ -281,82 +443,111 @@ private:
     for (auto &w : workers) w.join();
     Candidate b;
     for (const auto &c : best)
-      if (c.score > b.score) b = c;
+      if (better(c, b)) b = c;
     return b;
   }
 
-  bool relocalize(Candidate &result, bool from_service) {
+  bool runRelocalize(Candidate &result, bool from_service) {
     if (!field_ready_ || !haveScan()) {
       RCLCPP_WARN(get_logger(), "地图或激光数据未就绪, 无法重定位");
       return false;
     }
+    phase_ = Phase::Searching;
+    publishStatus("searching");
+
     const auto t0 = now();
     const auto &info = map_->info;
     const int w = info.width, h = info.height;
 
-    // 粗搜: 所有离障碍够远的格子(含未知区), 按 coarse_step 抽样
     const int stride = std::max(1, (int)(coarse_step_ / info.resolution));
     std::vector<std::pair<double, double>> coarse_pos;
+    coarse_pos.reserve((w / stride) * (h / stride));
     for (int gy = 0; gy < h; gy += stride)
       for (int gx = 0; gx < w; gx += stride) {
         if (dist_[(size_t)gy * w + gx] < min_clearance_) continue;
+        if (map_->data[(size_t)gy * w + gx] != 0) continue;
         coarse_pos.emplace_back(info.origin.position.x + (gx + 0.5) * info.resolution,
                                 info.origin.position.y + (gy + 0.5) * info.resolution);
       }
     std::vector<double> coarse_yaws;
-    for (double a = -M_PI; a < M_PI; a += coarse_yaw_step_) coarse_yaws.push_back(a);
-    auto pts_coarse = beams(400);
+    for (double a = -M_PI; a < M_PI - 1e-9; a += coarse_yaw_step_)
+      coarse_yaws.push_back(a);
+
+    auto pts_coarse = beams(500);
     if (pts_coarse.size() < 20) {
       RCLCPP_WARN(get_logger(), "有效激光束过少(%zu), 无法重定位", pts_coarse.size());
+      phase_ = Phase::AskManual;
+      publishStatusHit("ask_manual", 0.0);
       return false;
     }
-    Candidate best = search(coarse_pos, coarse_yaws, pts_coarse);
+    RCLCPP_INFO(get_logger(),
+        "粗搜(宽σ): %zu×%zu 候选", coarse_pos.size(), coarse_yaws.size());
+    Candidate best = search(coarse_pos, coarse_yaws, pts_coarse, score_);
 
-    // 精搜: 最优附近 ±0.3m/0.05m 步长, ±12°/2° 步长, 更多激光束
     std::vector<std::pair<double, double>> fine_pos;
-    for (double dx = -0.3; dx <= 0.3; dx += 0.05)
-      for (double dy = -0.3; dy <= 0.3; dy += 0.05)
+    for (double dx = -0.30; dx <= 0.30 + 1e-9; dx += 0.05)
+      for (double dy = -0.30; dy <= 0.30 + 1e-9; dy += 0.05)
         fine_pos.emplace_back(best.x + dx, best.y + dy);
     std::vector<double> fine_yaws;
-    for (double da = -12 * M_PI / 180; da <= 12 * M_PI / 180; da += 2 * M_PI / 180)
+    for (double da = -15 * M_PI / 180; da <= 15 * M_PI / 180 + 1e-9; da += 2 * M_PI / 180)
       fine_yaws.push_back(best.yaw + da);
     auto pts_fine = beams(900);
-    Candidate fine = search(fine_pos, fine_yaws, pts_fine);
-    if (fine.score < best.score) fine = best;
+    RCLCPP_INFO(get_logger(), "精搜(窄σ): %zu×%zu 候选", fine_pos.size(), fine_yaws.size());
+    Candidate fine = search(fine_pos, fine_yaws, pts_fine, score_tight_);
+    if (better(best, fine)) fine = best;
+
+    fine.black_hit = blackHitRatio(pts_fine, fine.x, fine.y,
+                                   std::cos(fine.yaw), std::sin(fine.yaw));
+    fine.tight = scorePoseField(pts_fine, fine.x, fine.y,
+                                std::cos(fine.yaw), std::sin(fine.yaw), score_tight_);
     result = fine;
 
     const double dt = (now() - t0).seconds();
-    if (fine.score < accept_score_) {
-      RCLCPP_WARN(get_logger(),
-          "重定位匹配分过低: %.2f < %.2f (耗时%.1fs), 不发布位姿", fine.score, accept_score_, dt);
-      return false;
-    }
+    RCLCPP_INFO(get_logger(),
+        "最高置信度位姿: x=%.2f y=%.2f yaw=%.1f° 置信度=%.1f%% (%.1fs)%s",
+        fine.x, fine.y, fine.yaw * 180 / M_PI, fine.black_hit * 100.0, dt,
+        from_service ? " [服务]" : "");
+
     geometry_msgs::msg::PoseWithCovarianceStamped msg;
     msg.header.frame_id = "map";
-    msg.header.stamp = now();
     msg.pose.pose.position.x = fine.x;
     msg.pose.pose.position.y = fine.y;
     msg.pose.pose.orientation.z = std::sin(fine.yaw / 2);
     msg.pose.pose.orientation.w = std::cos(fine.yaw / 2);
-    msg.pose.covariance[0] = msg.pose.covariance[7] = 0.25 * 0.25;
-    msg.pose.covariance[35] = 0.17 * 0.17;
-    pose_pub_->publish(msg);
+    msg.pose.covariance[0] = 0.25;
+    msg.pose.covariance[7] = 0.25;
+    msg.pose.covariance[35] = 0.25;
+    // stamp=0 → AMCL 用最新 TF，避免 now()/过期 LIO 时间导致 extrapolation。
+    msg.header.stamp.sec = 0;
+    msg.header.stamp.nanosec = 0;
+    for (int i = 0; i < 3; ++i) {
+      pose_pub_->publish(msg);
+      if (i < 2) rclcpp::sleep_for(std::chrono::milliseconds(30));
+    }
     last_reloc_time_ = now();
-    RCLCPP_INFO(get_logger(),
-        "重定位成功: x=%.2f y=%.2f yaw=%.1f° score=%.2f (耗时%.1fs)%s",
-        fine.x, fine.y, fine.yaw * 180 / M_PI, fine.score, dt,
-        from_service ? " [服务触发]" : "");
+    RCLCPP_INFO(get_logger(), "已下发 /initialpose x=%.2f y=%.2f yaw=%.1f° (stamp=0/latest)",
+                fine.x, fine.y, fine.yaw * 180 / M_PI);
+
+    enterAfterReloc(fine.black_hit);
     return true;
   }
 
-  // 成员
   bool auto_on_startup_, watchdog_en_;
-  double accept_score_, sigma_, coarse_step_, coarse_yaw_step_;
-  double max_beam_range_, min_clearance_, watchdog_score_, watchdog_sigma_;
+  double accept_score_, min_black_hit_, reloc_trigger_hit_, mid_wait_sec_, reloc_cooldown_sec_;
+  double sigma_, coarse_step_, coarse_yaw_step_;
+  double max_beam_range_, min_clearance_, watchdog_sigma_;
+  double post_nav_hit_, post_nav_settle_sec_;
   int num_threads_, watchdog_count_;
-  bool field_ready_ = false, startup_done_ = false;
-  int startup_tries_ = 0, low_score_cnt_ = 0;
+  bool field_ready_ = false;
+  bool navigating_ = false;
+  bool post_nav_pending_ = false;
+  Phase phase_ = Phase::Boot;
+  int low_score_cnt_ = 0;
+  bool ask_manual_shown_ = false;
+  double last_hit_ = 0.0;
   rclcpp::Time last_reloc_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time mid_wait_start_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time post_nav_ready_at_{0, 0, RCL_ROS_TIME};
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::TimerBase::SharedPtr watchdog_timer_;
@@ -368,10 +559,11 @@ private:
 
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav_status_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_;
-  rclcpp::TimerBase::SharedPtr startup_timer_;
-  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr accept_srv_;
 };
 
 int main(int argc, char **argv) {

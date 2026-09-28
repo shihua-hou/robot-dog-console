@@ -630,7 +630,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
   <div id="hRight">
     <button class="hbtn" data-go="nav">
       <span class="ico nav"><svg class="ic"><use href="#i-nav"/></svg></span>
-      <span class="txt"><b>导航</b><small>自动重定位 · 设姿/目标 · 热换图</small></span>
+      <span class="txt"><b>导航</b><small>手动重定位 · 设目标 · 热换图</small></span>
       <span class="live" id="sbNav">未启动</span>
     </button>
     <button class="hbtn" data-go="map">
@@ -864,8 +864,7 @@ function toast(msg,kind){
 var UI={route:'home',selMap:localStorage.getItem('dog_selMap')||'',activeMap:''}; // home|nav|map|maps|edit|settings|motion
 var freshMap='';
 var DPR=Math.min(2,window.devicePixelRatio||1);
-var locReady=false, relocBusy=false;
-var relocMode=localStorage.getItem('relocMode')||'auto'; // 'auto'=自动重定位看门狗 / 'odom'=里程计模式
+var locReady=false, relocBusy=false, locBlackHit=null; // locBlackHit: 0~1 黑点命中率
 var S={fastlio:false,nav2:false,livox:false,bridge:false,scan:false,map_building:false,rosbridge:false,auto_relocalize:false};
 var ros=null,connected=false,subsStarted=false;
 var buildMeta=null,buildData=null,navMeta=null,navData=null;
@@ -878,6 +877,14 @@ var lioQual={ok:true, jumpXy:0, jumpYawDeg:0, skipAccum:0, hold:0,
 /** 导航页位姿：直接写 robot，不做 LIO 跳变过滤（否则 (0,0)→AMCL 真值会被当成炸了丢掉） */
 function feedNavPose(x,y,yaw,z,quat){
   if(!isFinite(x)||!isFinite(y)||!isFinite(yaw))return;
+  // LIO 发散到地图外时箭头/激光都会没影 — 丢弃并提示
+  if(Math.hypot(x,y)>200){
+    if(!window._lioBlowToast || Date.now()-window._lioBlowToast>8000){
+      window._lioBlowToast=Date.now();
+      toast('里程计已发散（'+x.toFixed(0)+','+y.toFixed(0)+'）— 请关导航再开，或重启定位','err');
+    }
+    return;
+  }
   var zz=(z!=null&&isFinite(z))?z:(robot.z||0);
   robot.x=x; robot.y=y; robot.yaw=yaw; robot.z=zz;
   if(quat){robot.qx=quat.x;robot.qy=quat.y;robot.qz=quat.z;robot.qw=quat.w}
@@ -939,6 +946,8 @@ var path=null, navStatus='idle', mappingPhase='idle', armed='';
 var mappingSession=false; // 仅「开始建图」置位；导航用的 LIO 不算建图
 var scanPts=null; // LaserScan → base_footprint 直角坐标 [x0,y0,…]
 var scanPtsTs=0;
+var scanMapPts=null; // /web/scan_map → map 系 [x0,y0,…]
+var scanMapTs=0;
 var mapPcdReady=false, mapStatusTimer=null, mapVideoTimer=null;
 var drag=null;
 var vel={vx:0,vy:0,wz:0}, velPub=null;
@@ -975,7 +984,12 @@ function go(r){
   if(isMap){ startMapPage(); }
   else { stopMapPage(); }
   renderMenu(); renderSide(); updateHint();
-  if(r==='nav'){resizeCv();draw()}
+  if(r==='nav'){
+    resizeCv();draw();
+    // 导航已经在跑但页面还没拿到地图(比如中途刷新页面、或者刚才 rosbridge
+    // 订阅时序没赶上)——兜底用 HTTP 直取一次，不用非得重启导航。
+    if(S.nav2&&!navMeta)fetchMapHttp();
+  }
   if(r==='map'){resizeMap3d(); highlightNext()}
   if(r==='maps')refreshMaps();
   if(r==='nav')refreshMapSelect();
@@ -1189,16 +1203,13 @@ function renderNavTools(){
     box.appendChild(b);
     return b;
   }
-  addT('自动重定位模式','',()=>setRelocMode('auto'),'btnRelocAuto');
-  addT('里程计模式','',()=>setRelocMode('odom'),'btnRelocOdom');
+  addT('重定位','',requestRelocalize,'btnReloc');
   addT('设初始位姿','',()=>setArmed('init'),'btnArmInit');
-  addT('手动重定位','',requestRelocalize,'btnReloc');
   addT('设目标','',()=>setArmed('goal'),'btnArmGoal');
   addT('取消目标','',()=>{
     pub('/web/nav_cancel','std_msgs/Empty',{});
     toast('已取消目标');
   },'btnCancelGoal');
-  renderRelocMode();
 }
 
 function highlightNext(){
@@ -1299,14 +1310,12 @@ function updateHint(){
       :mappingSession?'建图中：左摇杆平移，右摇杆转向；覆盖完后点「停止」或直接「保存地图」'
       :mappingPhase==='stopped'?'点「保存地图」转成 PGM（约十几秒）':'建图：开始 → 遥控覆盖 → 停止/保存';
   }else if(UI.route==='nav'){
-    h.textContent=!S.nav2?'选地图后点「启动导航」（会拉起定位 + 自动重定位）'
-      :armed==='init'?'在地图上按住拖出车头朝向 → 松手设姿'
+    h.textContent=!S.nav2?'选地图后点「启动导航」，建议再点「重定位」或「设初始位姿」'
+      :armed==='init'?'在地图上按住拖出车头朝向 → 松手设姿（可选）'
       :armed==='goal'?'在地图上按住拖出朝向 → 松手下发目标'
       :relocBusy?'正在全图搜索匹配位置，请稍候…'
-      :!locReady&&initP.x==null?'正在自动重定位…若久未成功可「设初始位姿」兜底'
-      :!locReady?'已设初值，等待 AMCL 收敛…'
       :navStatus==='navigating'||navStatus==='active'?'导航中… 急停 / 取消目标可停'
-      :'定位就绪后点「设目标」下发';
+      :'点「设目标」下发；定位置信度仅供参考，不再锁导航';
   }
 }
 
@@ -1334,13 +1343,11 @@ function renderSide(){
       '<div>Nav2 <b>'+(S.nav2?'运行中':'未启动')+'</b></div>'+
       '<div>状态 <b>'+navStatus+'</b></div>'+
       '<div>地图 <b>'+(UI.activeMap||UI.selMap||'-')+'</b></div>'+
-      '<div>LIO/扫描 <b>'+(S.fastlio?'LIO':'无LIO')+' / '+(S.scan?(scanPts&&scanPts.length?(scanPts.length/2|0)+'点':'无数据'):'未启动')+'</b></div>'+
-      '<div>定位模式 <b>'+(relocMode==='auto'?'自动重定位':'里程计')+'</b></div>'+
-      '<div>定位 <b>'+(locReady?'已对齐(贴墙)':(relocBusy?'匹配中…':(initP.x!=null?'收敛中/待确认':'待定·自动重定位中')))+'</b></div>'+
-      '<div>初值 <b>'+(initP.x==null?'-':initP.x.toFixed(2)+','+initP.y.toFixed(2))+'</b></div>'+
+      '<div>LIO/扫描 <b>'+(S.fastlio?'LIO':'无LIO')+' / '+(S.scan?(scanPts&&scanPts.length?(scanPts.length/2|0)+'点'+(scanPtsTs?(Date.now()-scanPtsTs>1500?' · 卡住':' · 实时'):''):'无数据'):'未启动')+'</b></div>'+
+      '<div>定位置信度 <b>'+(locBlackHit==null?'-':((locBlackHit*100).toFixed(0)+'%'))+'</b></div>'+
       '<div>目标 <b>'+(goal.x==null?'-':goal.x.toFixed(2)+','+goal.y.toFixed(2))+'</b></div>'+
       '<div style="margin-top:6px;font-size:11px;color:var(--dim)">图例：白=可通行 · 黑=障碍 · 灰=未知</div>'+
-      '<div style="margin-top:4px;font-size:11px;color:var(--dim)">右侧工具：初始位姿 / 重定位 / 目标</div>'+poseLine;
+      '<div style="margin-top:4px;font-size:11px;color:var(--dim)">可点「重定位」/「设初始位姿」；导航结束或置信度过低会自动纠偏</div>'+poseLine;
   }
 }
 function syncPoseSide(){
@@ -1379,23 +1386,65 @@ function setBar(id,pct,tileId){
 }
 
 /* ---- ROS ---- */
+var _reconnTimer=null, _reconnDelay=1200, _reconnToastAt=0, _wantRos=true;
 function connect(){
+  _wantRos=true;
+  if(_reconnTimer){clearTimeout(_reconnTimer);_reconnTimer=null}
   if(ros)try{ros.close()}catch(e){}
   rosUrl=$('rosUrl').value.trim()||rosUrl;
   localStorage.setItem('dog_ros_url',rosUrl);
   ros=new ROSLIB.Ros({url:rosUrl});
-  ros.on('connection',()=>{connected=true;setConn(true);toast('已连接','ok');startSubs()});
-  ros.on('close',()=>{connected=false;subsStarted=false;setConn(false)});
-  ros.on('error',()=>toast('rosbridge 连接失败','err'));
+  ros.on('connection',()=>{
+    connected=true; _reconnDelay=1200;
+    setConn(true);
+    if(Date.now()-_reconnToastAt>4000){toast('已连接','ok');_reconnToastAt=Date.now()}
+    startSubs();
+  });
+  ros.on('close',()=>{
+    connected=false; subsStarted=false; setConn(false);
+    scheduleRosReconnect('close');
+  });
+  ros.on('error',()=>{
+    // 不弹 toast 刷屏；交给自动重连
+    scheduleRosReconnect('error');
+  });
+}
+function scheduleRosReconnect(why){
+  if(!_wantRos)return;
+  if(_reconnTimer)return;
+  setConn(false);
+  var wait=_reconnDelay;
+  _reconnDelay=Math.min(Math.round(_reconnDelay*1.6), 12000);
+  _reconnTimer=setTimeout(function(){
+    _reconnTimer=null;
+    if(!_wantRos||connected)return;
+    if(Date.now()-_reconnToastAt>8000){
+      toast('rosbridge 重连中…','err');
+      _reconnToastAt=Date.now();
+    }
+    connect();
+  }, wait);
 }
 function setConn(on){
   $('hDot').className='dot '+(on?'on':'off');
   $('topDot').className='dot '+(on?'on':'off');
-  $('hSub').textContent=on?(S.nav2?'导航运行中':mappingSession?'建图运行中':'已连接 · 空闲'):'未连接';
+  $('hSub').textContent=on?(S.nav2?'导航运行中':mappingSession?'建图运行中':'已连接 · 空闲'):'未连接 · 自动重连中';
 }
-function pub(name,type,msg){
+// 设目标/设初始位姿/取消导航这类一次性指令走 rosbridge 单发很容易被这台机器人
+// 已实测的高延迟/高抖动 WiFi（40~375ms，偶发丢包）吃掉——跟摇杆归零指令改成
+// sendStopBurst() 补发是同一个教训。这里按话题名缓存已 advertise 的 Topic
+// （省去每次重新握手），并在 ~270ms 内补发 3 次；后端各回调本来就是幂等的
+// （重复设同一个目标/取消，不会有副作用），补发不会引入新问题。
+var _pubTopics={};
+function pub(name,type,msg,times){
   if(!connected){toast('未连接','err');return}
-  new ROSLIB.Topic({ros:ros,name:name,messageType:type}).publish(msg);
+  var t=_pubTopics[name];
+  if(!t||t.ros!==ros){t=new ROSLIB.Topic({ros:ros,name:name,messageType:type});_pubTopics[name]=t}
+  var n=times||3, i=0;
+  (function again(){
+    t.publish(msg);
+    if(++i<n)setTimeout(again,90);
+  })();
 }
 function sub(name,type,cb,thr){
   var t=new ROSLIB.Topic({ros:ros,name:name,messageType:type,throttle_rate:thr||0});
@@ -1411,12 +1460,8 @@ function startSubs(){
   sub('/web/robot_pose','geometry_msgs/PoseStamped',m=>{
     if(UI.route==='map')return;
     var p=m.pose.position, q=m.pose.orientation;
-    // web_ops 只在 map→base_footprint TF 存在时才发这条消息（见其 cb_robot_pose_timer）；
-    // 收到即代表 AMCL 已经有效定位——不管是自动重定位还是手动「设初始位姿」触发的。
-    if(S.nav2 && !locReady){
-      locReady=true; window._needInitToast=false;
-      updateHint();highlightNext();renderSide();
-    }
+    // 仅更新箭头位姿。『就绪』由 /relocalize_status=aligned（定位置信度≥60%）决定，
+    // 绝不能因为 AMCL 有任意 map→footprint 就标成功。
     feedNavPose(p.x,p.y,yawOf(q),p.z,q);
     _navPoseTs=Date.now();
     syncPoseSide(); draw();
@@ -1467,9 +1512,15 @@ function startSubs(){
     $('tMode').textContent=n;
   });
   sub('/web/nav_status','std_msgs/String',m=>{
-    navStatus=m.data.split(':')[0];
+    var raw=(m.data||'');
+    navStatus=raw.split(':')[0];
+    var detail=raw.indexOf(':')>=0?raw.slice(raw.indexOf(':')+1):'';
     if(navStatus==='reached')toast('已到达目标','ok');
-    if(navStatus==='aborted')toast('导航失败','err');
+    if(navStatus==='aborted')toast(detail?('导航失败: '+detail):'导航失败','err');
+    // blocked 仅提示，不关导航、不锁目标
+    if(navStatus==='blocked'){
+      if(detail) toast('提示: '+detail,'');
+    }
     updateHint();highlightNext();renderSide();
   });
   sub('/web/sys_status','std_msgs/String',m=>{
@@ -1480,8 +1531,15 @@ function startSubs(){
     $('sbNav').textContent=S.nav2?('运行 · '+navStatus):'未启动';
   });
   sub('/plan','nav_msgs/Path',m=>{path=m;draw()},120);
-  // /scan：保留上一帧，避免空圈导致红点闪烁
+  // 优先 /web/scan_map（已是 map 系 xy），走路时不会因箭头位姿滞后而漂
+  sub('/web/scan_map','std_msgs/Float32MultiArray',m=>{
+    var d=m.data||[];
+    if(d.length>=8){ scanMapPts=d; scanMapTs=Date.now(); scanPtsTs=scanMapTs; }
+    if(UI.route==='nav')draw();
+  },80);
+  // /scan 兜底（无 map TF 时仍可看机体系投影）
   sub('/scan','sensor_msgs/LaserScan',m=>{
+    if(scanMapPts && Date.now()-scanMapTs<800)return; // 有 map 系就别抢
     var pts=[], a=m.angle_min, rmin=m.range_min||0.05, rmax=m.range_max||30;
     for(var i=0;i<m.ranges.length;i++,a+=m.angle_increment){
       var r=m.ranges[i];
@@ -1491,13 +1549,56 @@ function startSubs(){
     if(pts.length>=8){ scanPts=pts; scanPtsTs=Date.now(); }
     if(UI.route==='nav')draw();
   },80);
-  refreshSys(); setInterval(refreshSys,5000);
+  sub('/relocalize_status','std_msgs/String',m=>{
+    var s=(m.data||'').trim();
+    var hitM=s.match(/^(?:aligned|hold|weak|failed|critical|ask_manual):([0-9.]+)$/);
+    if(hitM) locBlackHit=parseFloat(hitM[1]);
+    if(s==='aligned' || s.indexOf('aligned:')===0){
+      locReady=true; relocBusy=false;
+      window._needInitToast=false; window._askManualShown=false; window._weakPoseToast=false;
+    }else if(s==='need_manual'||s==='need_init'){
+      relocBusy=false;
+      // 手动模式：等用户点「重定位」或设姿
+    }else if(s==='searching'||s==='waiting_amcl'){
+      relocBusy=true; locReady=false;
+    }else if(s.indexOf('hold:')===0){
+      // 0.35~0.60：只更新置信度；若已就绪则保持就绪，未就绪则等 mid_wait/弹窗
+      relocBusy=false;
+      if(locReady){ /* 锁定后跌入区间：不踢出就绪 */ }
+    }else if(s.indexOf('ask_manual:')===0){
+      relocBusy=false;
+      maybeAskManualPose(locBlackHit);
+    }else if(s.indexOf('critical:')===0){
+      relocBusy=false;
+      // 即将/正在重搜，暂不改 locReady（重搜后会发新状态）
+    }else if(s==='failed'||s==='need_retry'||s.indexOf('failed:')===0||s.indexOf('weak:')===0){
+      relocBusy=false;
+      if(locBlackHit!=null && locBlackHit>=0.60){
+        locReady=true; window._needInitToast=false;
+      }else if(!locReady){
+        /* 未就绪，等 ask_manual 或用户操作 */
+      }
+    }
+    updateHint(); renderSide();
+  },200);
+  // refreshSys 改由全局心跳轮询，避免重连时叠多个定时器
 }
 function ingest(m,which){
   var meta={width:m.info.width,height:m.info.height,resolution:m.info.resolution,origin:m.info.origin};
   var data=new Int8Array(m.data.length); for(var i=0;i<m.data.length;i++)data[i]=m.data[i];
   if(which==='build'){buildMeta=meta;buildData=data} else {navMeta=meta;navData=data}
   draw();
+}
+// /map 是 map_server 只发一次的 TRANSIENT_LOCAL latched 消息；rosbridge 对任意
+// 话题都固定用 BEST_EFFORT/VOLATILE 订阅，浏览器这边的订阅只要建立得比那一次
+// 发布晚——WiFi 掉线重连、开导航前网页没提前订阅——就永远收不到，地图一直是空的
+// （这台机器人现在这条 WiFi 本来就不稳，掉线重连很常见）。用后端 /api/nav2/map
+// 走普通 HTTP 一次性拉取，不依赖 rosbridge 订阅的时序，字段结构跟 rosbridge 推过来
+// 的一样，直接复用 ingest()。
+function fetchMapHttp(){
+  httpGet(API+'/api/nav2/map',r=>{
+    if(r&&r.ok&&r.map)ingest(r.map,'nav');
+  },()=>{});
 }
 function renderChips(){
   var box=$('hChips'); box.innerHTML='';
@@ -1620,7 +1721,7 @@ function startNav(){
   window._navStarting=true; syncNavButtons();
   locReady=false; relocBusy=false;
   mappingSession=false;
-  toast('正在启动定位 + Nav2 + 自动重定位…');
+  toast('正在启动定位 + Nav2…');
   httpPost(API+'/api/nav2/start',{map:map},r=>{
     window._navStarting=false;
     if(r.ok){
@@ -1628,10 +1729,9 @@ function startNav(){
       initP={x:null,y:null,yaw:0}; goal={x:null,y:null,yaw:0};
       S.nav2=true;
       mappingSession=false;
-      toast(r.hint||'已启动：等待自动重定位，也可手动设姿','ok');
-      // 新起的 auto_relocalize 默认是"自动重定位模式"；把上次记住的偏好同步过去
-      setTimeout(function(){ if(relocMode==='odom') setRelocMode('odom'); renderRelocMode(); }, 3000);
-      setTimeout(function(){ pollRelocHint(); }, 8000);
+      toast(r.hint||'已启动：请点「重定位」或「设初始位姿」','ok');
+      fetchMapHttp();
+      setTimeout(function(){ pollRelocHint(); }, 3000);
     }else toast(r.error||'失败','err');
     syncNavButtons();updateHint();highlightNext();renderSide();refreshSys();
   },()=>{window._navStarting=false;syncNavButtons();toast('启动失败','err')});
@@ -1654,42 +1754,58 @@ function stopNav(){
     syncNavButtons();updateHint();highlightNext();renderSide();
   });
 }
+function maybeAskManualPose(hit){
+  if(window._askManualShown || locReady) return;
+  window._askManualShown=true;
+  var pct=hit==null?'?':(hit*100).toFixed(0);
+  var yes=confirm(
+    '定位置信度约 '+pct+'%，已等待≥15秒仍未达到 60%。\n\n'+
+    '是否手动设置初始位姿？\n\n'+
+    '「确定」= 手动设姿\n「取消」= 承认当前最高置信度位姿为正确位姿'
+  );
+  if(yes){
+    locReady=false;
+    toast('请点「设初始位姿」，在地图上拖出朝向','');
+    armMode('init');
+  }else{
+    // 承认当前位姿 → 通知后端锁定 + 本地就绪
+    httpPost(API+'/api/nav2/accept_pose',{},function(r){
+      locReady=true; relocBusy=false; window._needInitToast=false;
+      toast('已承认当前位姿，定位就绪','ok');
+      updateHint(); highlightNext(); renderSide();
+    },function(){
+      locReady=true; relocBusy=false;
+      toast('已承认当前位姿（本地就绪）','ok');
+      updateHint(); highlightNext(); renderSide();
+    });
+  }
+  updateHint(); renderSide();
+}
+function armMode(mode){
+  if(typeof setArmed==='function'){ setArmed(mode); return; }
+  armed=mode;
+  if($('cv'))$('cv').classList.add('cross');
+  updateHint(); highlightNext();
+}
 function requestRelocalize(){
   if(!S.nav2){toast('请先启动导航','err');return}
   if(relocBusy){toast('重定位进行中…');return}
-  relocBusy=true; locReady=false; updateHint();renderSide();
+  relocBusy=true; locReady=false; window._askManualShown=false; updateHint();renderSide();
   toast('正在全图搜索匹配位置…');
   httpPost(API+'/api/nav2/relocalize',{},r=>{
     relocBusy=false;
+    if(r.hit!=null) locBlackHit=+r.hit;
     if(r.ok){
-      locReady=true;
-      toast('重定位成功（激光贴障碍）','ok');
+      locReady=true; window._needInitToast=false; window._weakPoseToast=false; window._askManualShown=false;
+      toast('重定位成功（定位置信度'+((locBlackHit!=null?(locBlackHit*100).toFixed(0):'?'))+'%）','ok');
     }else{
+      // 未达60%：等后端 ask_manual / mid hold，不立刻报错刷屏
       locReady=false;
-      toast((r.error||'全局重定位未收敛')+' — 也可对准所在位置「设初始位姿」','err');
-      setArmed('init');
+      if(r.hit!=null && r.hit<0.35)
+        toast((r.error||'置信度过低')+' — 可「设初始位姿」或再点「重定位」','err');
     }
     updateHint();highlightNext();renderSide();
   },()=>{relocBusy=false;toast('重定位请求失败','err');updateHint();renderSide()});
-}
-function renderRelocMode(){
-  var a=$('btnRelocAuto'), o=$('btnRelocOdom');
-  if(a)a.classList.toggle('armed',relocMode==='auto');
-  if(o)o.classList.toggle('armed',relocMode==='odom');
-}
-function setRelocMode(mode){
-  if(!S.nav2){toast('请先启动导航','err');return}
-  if(mode===relocMode)return;
-  httpPost(API+'/api/nav2/reloc_mode',{mode:mode},r=>{
-    if(r.ok){
-      relocMode=r.mode||mode;
-      localStorage.setItem('relocMode',relocMode);
-      renderRelocMode();
-      toast(relocMode==='auto'?'已切到自动重定位模式':'已切到里程计模式（不自动重定位，需要时点「手动重定位」）','ok');
-    }else{
-      toast(r.error||'切换定位模式失败','err');
-    }
-  },()=>{toast('切换定位模式请求失败','err')});
 }
 function changeNavMap(){
   var map=($('mapSelect')&&$('mapSelect').value)||UI.selMap;
@@ -1697,17 +1813,14 @@ function changeNavMap(){
   setNavMap(map);
 }
 function pollRelocHint(){
-  // locReady 本身已经由 /web/robot_pose 是否有数据实时反映（map→base_footprint TF
-  // 存在即成功，见其订阅回调），这里只负责失败时的一次性提示兜底。
   if(!S.nav2||locReady)return;
   httpGet(API+'/api/log?file=auto_relocalize.log&n=50',r=>{
     var t=(r&&r.log)||'';
     var tail=t.slice(-800);
-    // 失败：匹配分过低 / 激光束太少 / 地图或激光未就绪（只 toast 一次，引导手设初值兜底）
-    if(/匹配分过低|有效激光束过少|地图或激光数据未就绪/.test(tail) && !locReady){
+    if(/拒绝: 黑点命中|红点未落入黑障碍|匹配分过低|有效激光束过少|地图或激光数据未就绪/.test(tail) && !locReady){
       if(!window._needInitToast){
         window._needInitToast=true;
-        toast('自动重定位未收敛 — 可挪到特征更多的位置，或「设初始位姿」兜底','err');
+        toast('定位置信度不足60% — 请点「设初始位姿」或再点「重定位」','err');
         updateHint();highlightNext();renderSide();
       }
     }
@@ -1716,15 +1829,11 @@ function pollRelocHint(){
 setInterval(function(){ if(S.nav2&&!locReady) pollRelocHint(); }, 4000);
 function setArmed(mode){
   if(!S.nav2){toast('请先启动导航','err');return}
-  if(mode==='goal'&&!locReady&&initP.x==null){
-    toast('定位尚未就绪：先等自动重定位，或点「重新定位」/「设初始位姿」','err');
-    // 仍允许 armed 预标记，但提示诚实
-  }
   armed=(armed===mode)?'':mode;
   $('cv').classList.toggle('cross',!!armed);
   highlightNext(); updateHint();
   if(armed==='init')toast('按住拖出车头朝向 → 松手');
-  if(armed==='goal')toast(locReady||initP.x!=null?'按住拖出朝向 → 松手下发':'可预标记，定位就绪后才会真正下发');
+  if(armed==='goal')toast('按住拖出朝向 → 松手下发');
 }
 
 
@@ -2091,10 +2200,44 @@ function ensureMap3d(){
   var points=new THREE.Points(geo, mat);
   points.renderOrder=0;
   scene.add(points);
-  Map3D={ready:true, renderer:renderer, scene:scene, camera:camera, points:points, dog:dog, grid:grid, anim:0, cloudSub:null, lastN:0, drag:false, lx:0, ly:0, yaw:0.7, pitch:0.55, dist:14, levM:levelMat()};
-  canvas.onpointerdown=function(e){Map3D.drag=true;Map3D.lx=e.clientX;Map3D.ly=e.clientY;canvas.setPointerCapture(e.pointerId)};
-  canvas.onpointerup=function(){Map3D.drag=false};
+  Map3D={ready:true, renderer:renderer, scene:scene, camera:camera, points:points, dog:dog, grid:grid, anim:0, cloudSub:null, lastN:0, drag:false, lx:0, ly:0, yaw:0.7, pitch:0.55, dist:14, levM:levelMat(), pinchD0:0, pinchDist0:0};
+  // 单指=拖拽旋转，双指=捏合缩放（平板无滚轮，onwheel 覆盖不到触屏）。
+  // 两指分开跟踪各自 pointerId，避免两个触点互相覆盖同一份 lx/ly 导致旋转乱跳、缩放完全无反应。
+  var _ptrs=new Map();
+  function _ptrDist(){
+    var pts=Array.from(_ptrs.values());
+    return Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y);
+  }
+  canvas.onpointerdown=function(e){
+    canvas.setPointerCapture(e.pointerId);
+    _ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(_ptrs.size===1){
+      Map3D.drag=true; Map3D.lx=e.clientX; Map3D.ly=e.clientY;
+    }else if(_ptrs.size===2){
+      Map3D.drag=false; Map3D.pinchD0=_ptrDist(); Map3D.pinchDist0=Map3D.dist;
+    }
+  };
+  function _ptrEnd(e){
+    _ptrs.delete(e.pointerId);
+    if(_ptrs.size===1){
+      var p=_ptrs.values().next().value;
+      Map3D.drag=true; Map3D.lx=p.x; Map3D.ly=p.y; Map3D.pinchD0=0;
+    }else{
+      Map3D.drag=false; Map3D.pinchD0=0;
+    }
+  }
+  canvas.onpointerup=_ptrEnd;
+  canvas.onpointercancel=_ptrEnd;
   canvas.onpointermove=function(e){
+    if(!_ptrs.has(e.pointerId))return;
+    _ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(_ptrs.size===2){
+      if(Map3D.pinchD0>0){
+        var d=_ptrDist();
+        Map3D.dist=Math.max(3, Math.min(60, Map3D.pinchDist0*(Map3D.pinchD0/Math.max(1,d))));
+      }
+      return;
+    }
     if(!Map3D.drag)return;
     var dx=e.clientX-Map3D.lx, dy=e.clientY-Map3D.ly;
     Map3D.lx=e.clientX; Map3D.ly=e.clientY;
@@ -2252,13 +2395,33 @@ function dataNow(){return UI.route==='map'?buildData:navData}
 function toPix(meta,wx,wy){
   return {x:(wx-meta.origin.position.x)/meta.resolution, y:meta.height-(wy-meta.origin.position.y)/meta.resolution};
 }
+// 建图/导航页 2D 地图的平移缩放状态：zoom 是相对「自适应铺满」基准的倍数，
+// panX/panY 是屏幕像素偏移，两页各自独立、互不影响。
+var View2D={map:{zoom:1,panX:0,panY:0}, nav:{zoom:1,panX:0,panY:0}};
+function mapTransform(route,meta,w,h){
+  var v=View2D[route]||(View2D[route]={zoom:1,panX:0,panY:0});
+  var base=Math.min(w/meta.width,h/meta.height);
+  var scale=base*v.zoom;
+  return {scale:scale, base:base, ox:(w-meta.width*scale)/2+v.panX, oy:(h-meta.height*scale)/2+v.panY};
+}
+function zoom2DAt(route,meta,w,h,cx,cy,factor){
+  var v=View2D[route]||(View2D[route]={zoom:1,panX:0,panY:0});
+  var t=mapTransform(route,meta,w,h);
+  var wx=(cx-t.ox)/t.scale, wy=(cy-t.oy)/t.scale;
+  v.zoom=Math.max(0.5,Math.min(20,v.zoom*factor));
+  var s2=t.base*v.zoom, ox2=cx-wx*s2, oy2=cy-wy*s2;
+  v.panX=ox2-(w-meta.width*s2)/2; v.panY=oy2-(h-meta.height*s2)/2;
+}
+function pan2D(route,dx,dy){
+  var v=View2D[route]||(View2D[route]={zoom:1,panX:0,panY:0});
+  v.panX+=dx; v.panY+=dy;
+}
 function toWorld(clientX,clientY){
   var meta=metaNow(); if(!meta)return null;
   var rect=cv.getBoundingClientRect();
   var cx=clientX-rect.left, cy=clientY-rect.top;
-  var scale=Math.min(rect.width/meta.width,rect.height/meta.height);
-  var ox=(rect.width-meta.width*scale)/2, oy=(rect.height-meta.height*scale)/2;
-  var px=(cx-ox)/scale, py=(cy-oy)/scale;
+  var t=mapTransform(UI.route,meta,rect.width,rect.height);
+  var px=(cx-t.ox)/t.scale, py=(cy-t.oy)/t.scale;
   if(px<0||py<0||px>meta.width||py>meta.height)return null;
   return {x:meta.origin.position.x+px*meta.resolution, y:meta.origin.position.y+(meta.height-py)*meta.resolution};
 }
@@ -2280,13 +2443,17 @@ function draw(){
     ctx.fillStyle='#4d92ff88'; ctx.font='15px sans-serif'; ctx.textAlign='center';
     ctx.fillText(UI.route==='map'?'等待建图预览 /map_building…':'启动导航后显示地图',w/2,h/2); return;
   }
-  var scale=Math.min(w/meta.width,h/meta.height);
-  var ox=(w-meta.width*scale)/2, oy=(h-meta.height*scale)/2;
+  var t2d=mapTransform(UI.route,meta,w,h);
+  var scale=t2d.scale, ox=t2d.ox, oy=t2d.oy;
   var img=ctx.createImageData(meta.width,meta.height);
-  // 标准三色：未知灰 / 可通行白 / 障碍黑（OccupancyGrid: -1 / 0 / 100）
-  for(var i=0;i<meta.width*meta.height;i++){
-    var v=data[i], c=v<0?160:(v>=65?24:250);
-    img.data[i*4]=c;img.data[i*4+1]=c;img.data[i*4+2]=c;img.data[i*4+3]=255;
+  // OccupancyGrid row0 = 低 world-Y；Canvas ImageData row0 = 顶行。
+  // 必须按行翻转，否则黑墙与 toPix 叠加的红点/蓝三角上下(及航向相关的左右)错位。
+  for(var gy=0;gy<meta.height;gy++){
+    var src=gy*meta.width, dst=(meta.height-1-gy)*meta.width;
+    for(var gx=0;gx<meta.width;gx++){
+      var v=data[src+gx], c=v<0?160:(v>=65?24:250), o=(dst+gx)*4;
+      img.data[o]=c;img.data[o+1]=c;img.data[o+2]=c;img.data[o+3]=255;
+    }
   }
   var tmp=document.createElement('canvas'); tmp.width=meta.width; tmp.height=meta.height;
   tmp.getContext('2d').putImageData(img,0,0);
@@ -2299,16 +2466,28 @@ function draw(){
     }
     ctx.stroke();
   }
-  // 激光点云（红点）；超过 2s 无更新则半透提示，但不清空（防闪）
-  if(UI.route==='nav'&&scanPts&&scanPts.length){
-    var age=Date.now()-scanPtsTs;
-    ctx.fillStyle=age>2000?'#ef444466':'#ef4444';
-    var c=Math.cos(robot.yaw), sn=Math.sin(robot.yaw);
-    for(var si=0;si+1<scanPts.length;si+=2){
-      var wx=robot.x+scanPts[si]*c-scanPts[si+1]*sn;
-      var wy=robot.y+scanPts[si]*sn+scanPts[si+1]*c;
-      var sp=toPix(meta,wx,wy);
-      ctx.fillRect(ox+sp.x*scale-1, oy+sp.y*scale-1, 2.2, 2.2);
+      // 激光：优先 map 系 /web/scan_map；否则用机体系×当前箭头（易在运动时漂）
+  if(UI.route==='nav'){
+    var age=Date.now()-(scanMapPts?scanMapTs:scanPtsTs);
+    var stale=age>1500;
+    ctx.fillStyle=stale?'#ef444455':'#ef4444';
+    if(scanMapPts && scanMapPts.length>=8){
+      for(var si=0;si+1<scanMapPts.length;si+=2){
+        var sp=toPix(meta,scanMapPts[si],scanMapPts[si+1]);
+        ctx.fillRect(ox+sp.x*scale-1, oy+sp.y*scale-1, 2.2, 2.2);
+      }
+    }else if(scanPts&&scanPts.length){
+      var c=Math.cos(robot.yaw), sn=Math.sin(robot.yaw);
+      for(var sj=0;sj+1<scanPts.length;sj+=2){
+        var wx=robot.x+scanPts[sj]*c-scanPts[sj+1]*sn;
+        var wy=robot.y+scanPts[sj]*sn+scanPts[sj+1]*c;
+        var sp2=toPix(meta,wx,wy);
+        ctx.fillRect(ox+sp2.x*scale-1, oy+sp2.y*scale-1, 2.2, 2.2);
+      }
+    }
+    if(stale && (scanMapPts||scanPts)){
+      ctx.fillStyle='#ef4444'; ctx.font='12px sans-serif';
+      ctx.fillText('激光已卡住 '+(age/1000).toFixed(1)+'s（非实时）', 12, 28);
     }
   }
   if(UI.route==='nav'){arrow(meta,ox,oy,scale,initP,'#ffb020'); arrow(meta,ox,oy,scale,goal,'#ff4d4f')}
@@ -2336,21 +2515,87 @@ cv.addEventListener('pointerup',()=>{
   var mode=drag.mode,x=drag.x,y=drag.y; drag=null; armed=''; $('cv').classList.remove('cross');
   if(mode==='init'){
     initP={x:x,y:y,yaw:yaw};
-    locReady=false;  // 等 AMCL 收敛(map→base_footprint TF 出现)后 /web/robot_pose 会自动置真
     pub('/web/init_pose','geometry_msgs/Twist',{linear:{x:x,y:y,z:0},angular:{x:0,y:0,z:yaw}});
-    toast('初值已下发，AMCL 正在收敛（不必很准，走两步会自己贴墙）…','ok');
-    setTimeout(function(){ pollRelocHint(); }, 4000);
+    // 手动设姿 = 用户选定正确初值 → 锁定就绪
+    httpPost(API+'/api/nav2/accept_pose',{},function(){
+      locReady=true; relocBusy=false; window._askManualShown=false; window._needInitToast=false;
+      toast('初始位姿已设，定位就绪','ok');
+      updateHint(); highlightNext(); renderSide();
+    },function(){
+      locReady=true; relocBusy=false; window._askManualShown=false;
+      toast('初始位姿已设，定位就绪','ok');
+      updateHint(); highlightNext(); renderSide();
+    });
   }else{
     goal={x:x,y:y,yaw:yaw};
-    if(!locReady&&initP.x==null){
-      toast('已预标记目标，但定位未就绪 — 等重定位/设姿后再点「设目标」下发','err');
+    // 不再用置信度锁导航：运动中命中率波动是正常的，照常下发
+    pub('/web/nav_cmd','geometry_msgs/Twist',{linear:{x:x,y:y,z:0},angular:{x:0,y:0,z:yaw}});
+    if(locBlackHit!=null && locBlackHit<0.60){
+      toast('目标已下发（当前定位置信度 '+(locBlackHit*100).toFixed(0)+'%）','ok');
     }else{
-      pub('/web/nav_cmd','geometry_msgs/Twist',{linear:{x:x,y:y,z:0},angular:{x:0,y:0,z:yaw}});
       toast('目标已下发','ok');
     }
   }
   highlightNext();updateHint();renderSide();draw();
 });
+/* 地图平移/缩放：仅在未处于「设姿势/设目标点」拖拽模式时生效，
+   与上面按住拖出朝向的手势用 armed 互斥，不会互相打架。
+   单指拖动=平移，双指捏合=缩放，桌面端滚轮也能缩放。 */
+(function(){
+  var ptrs=new Map(), drag=null, pinchD0=0, pinchZoom0=1;
+  function active(){return (UI.route==='map'||UI.route==='nav')&&!armed;}
+  function localXY(e){var r=cv.getBoundingClientRect();return {x:e.clientX-r.left,y:e.clientY-r.top};}
+  function pinchDist(){var p=Array.from(ptrs.values());return Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y);}
+  cv.addEventListener('pointerdown',function(e){
+    if(!active())return;
+    cv.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId, localXY(e));
+    if(ptrs.size===1){
+      drag=localXY(e);
+    }else if(ptrs.size===2){
+      drag=null; pinchD0=pinchDist(); pinchZoom0=(View2D[UI.route]||{zoom:1}).zoom;
+    }
+  });
+  cv.addEventListener('pointermove',function(e){
+    if(!ptrs.has(e.pointerId))return;
+    ptrs.set(e.pointerId, localXY(e));
+    var meta=metaNow(); if(!meta)return;
+    var rect=cv.getBoundingClientRect(), w=rect.width, h=rect.height;
+    if(ptrs.size===2){
+      if(pinchD0>0){
+        var d=pinchDist(), pts=Array.from(ptrs.values());
+        var mx=(pts[0].x+pts[1].x)/2, my=(pts[0].y+pts[1].y)/2;
+        var v=View2D[UI.route]||(View2D[UI.route]={zoom:1,panX:0,panY:0});
+        zoom2DAt(UI.route, meta, w, h, mx, my, (pinchZoom0*(d/pinchD0))/v.zoom);
+        draw();
+      }
+      return;
+    }
+    if(!drag)return;
+    var p=ptrs.get(e.pointerId);
+    pan2D(UI.route, p.x-drag.x, p.y-drag.y);
+    drag=p; draw();
+  });
+  function end(e){
+    ptrs.delete(e.pointerId);
+    if(ptrs.size===1){drag=Array.from(ptrs.values())[0]; pinchD0=0;}
+    else{drag=null; pinchD0=0;}
+  }
+  cv.addEventListener('pointerup',end);
+  cv.addEventListener('pointercancel',end);
+  cv.addEventListener('wheel',function(e){
+    if(!active())return;
+    e.preventDefault();
+    var meta=metaNow(); if(!meta)return;
+    var rect=cv.getBoundingClientRect();
+    zoom2DAt(UI.route, meta, rect.width, rect.height, e.clientX-rect.left, e.clientY-rect.top, e.deltaY<0?1.15:1/1.15);
+    draw();
+  },{passive:false});
+  cv.addEventListener('dblclick',function(){
+    if(!active())return;
+    View2D[UI.route]={zoom:1,panX:0,panY:0}; draw();
+  });
+})();
 
 /* ---- dual joysticks: move + turn ---- */
 function sendVel(){
@@ -2359,6 +2604,22 @@ function sendVel(){
   if(inplaceMode){vel.vx=0;vel.vy=0}
   if(!velPub)velPub=new ROSLIB.Topic({ros:ros,name:'/cmd_vel',messageType:'geometry_msgs/Twist'});
   velPub.publish({linear:{x:vel.vx,y:vel.vy,z:0},angular:{x:0,y:0,z:vel.wz}});
+}
+// 松手归零指令只发一次的话，赶上这台机器人现在这种高延迟/高抖动的 WiFi
+// （实测 40~375ms，偶发丢包很正常），一旦这一次的包丢在路上，狗会一直执行
+// 收到的最后一个非零指令，停不下来——用户反馈"摇杆一碰转向就转个不停，
+// 松手也没用"。归零指令跟别处的 estopSilent() 一样，多发几次抗丢包，而不是
+// 赌通信必然可靠。中途只要摇杆/键盘又变成非零速度就立刻停止这轮补发。
+var _stopBurstTimer=null;
+function sendStopBurst(){
+  sendVel();
+  if(_stopBurstTimer)clearInterval(_stopBurstTimer);
+  var n=0;
+  _stopBurstTimer=setInterval(function(){
+    n++;
+    if(vel.vx||vel.vy||vel.wz||n>=6){clearInterval(_stopBurstTimer);_stopBurstTimer=null;return}
+    sendVel();
+  },100);
 }
 // 安全兜底：松开摇杆的 pointerup/pointercancel 有时不会送达摇杆本身
 // （触屏被系统手势/滚动截走、切后台、多指冲突等），一旦漏掉，vel 会停在
@@ -2403,7 +2664,7 @@ function bindJoy(pad,knob,kind){
     if(!down)return; down=false;
     knob.style.left='50%'; knob.style.top='50%'; knob.style.transform='translate(-50%,-50%)';
     if(kind==='turn')vel.wz=0; else {vel.vx=0;vel.vy=0}
-    sendVel();
+    sendStopBurst();
   }
   _joyEnders.push(function(){ if(down) end(); });
   _joyIsDownFns.push(function(){ return down; });
@@ -2433,7 +2694,7 @@ setInterval(()=>{
   if(_anyJoyDown()||_anyKeyDown()){ sendVel(); return; }
   if(Date.now()-_joyLastTouch>JOY_STALE_MS){
     vel={vx:0,vy:0,wz:0};
-    sendVel();
+    sendStopBurst();
     return;
   }
   sendVel();
@@ -2448,7 +2709,7 @@ window.addEventListener('keydown',e=>{
 });
 window.addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false; keyVel()});
 function keyVel(){
-  if(lockMode){vel={vx:0,vy:0,wz:0};sendVel();return}
+  if(lockMode){vel={vx:0,vy:0,wz:0};sendStopBurst();return}
   vel.vx=0;vel.vy=0;vel.wz=0;
   if(keys['w']||keys['arrowup'])vel.vx=VX;
   if(keys['s']||keys['arrowdown'])vel.vx=-VX;
@@ -2457,11 +2718,13 @@ function keyVel(){
   if(keys['arrowleft']||keys['q'])vel.wz=WZ;
   if(keys['arrowright']||keys['e'])vel.wz=-WZ;
   if(inplaceMode){vel.vx=0;vel.vy=0}
-  sendVel();
+  // 最后一个方向键松开、这次算出来是零速度：跟摇杆松手一样，补发几次抗丢包
+  if(!(vel.vx||vel.vy||vel.wz))sendStopBurst(); else sendVel();
 }
 function estopSilent(){
   vel={vx:0,vy:0,wz:0};
-  if(connected) for(var i=0;i<3;i++)sendVel();
+  if(connected)for(var i=0;i<3;i++)sendVel(); // 立刻连发几次求快
+  sendStopBurst(); // 再补发几次扛丢包，跟摇杆松手用同一套兜底
 }
 function estop(){
   estopSilent();
@@ -2548,6 +2811,13 @@ function refreshSys(){
     if(r.ctrl)setCtrlLabel(r.ctrl);
     else if(r.services) setCtrlLabel(r.services.bridge?'SDK':'APP');
     if(r.services){Object.assign(S,r.services);renderChips();setConn(connected);setCtrlLabel(S.bridge?'SDK':'APP');syncNavButtons();highlightNext()}
+    // 导航页一直没拿到地图(rosbridge 订阅时序没赶上/WiFi 掉线重连错过了那次
+    // latched 发布)——每 15 秒兜底重试一次 HTTP 直取，成功一次后 navMeta 有值
+    // 这个条件自然就不再触发了。
+    if(UI.route==='nav'&&S.nav2&&!navMeta&&Date.now()-(window._lastMapHttpTry||0)>15000){
+      window._lastMapHttpTry=Date.now();
+      fetchMapHttp();
+    }
   },()=>{setApiWarn(true)});
 }
 var apiWarnShown=false;
@@ -2556,6 +2826,16 @@ function setApiWarn(down){
   if(down&&!apiWarnShown){apiWarnShown=true;toast('API :8090 未连接（地图/系统信息不可用）','err')}
   if(!down)apiWarnShown=false;
 }
+
+/* 全局心跳：API 轮询 + rosbridge 掉线自动重连（不依赖 startSubs） */
+refreshSys();
+setInterval(refreshSys, 4000);
+setInterval(function(){
+  if(!_wantRos)return;
+  if(connected)return;
+  // 断线且没有排队重连时补一刀
+  if(!_reconnTimer) scheduleRosReconnect('watchdog');
+}, 6000);
 
 /* clock */
 setInterval(()=>{

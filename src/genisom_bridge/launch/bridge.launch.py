@@ -14,8 +14,8 @@ def generate_launch_description():
                 'local_ip': '192.168.168.150',
                 'local_port': 43988,
                 'dog_ip': '192.168.168.168',
-                'state_rate': 10.0,
-                # Disable SDK odom/TF so Nav2 uses FAST-LIO via lio_tf_bridge.
+                'state_rate': 20.0,
+                # 不发 odom TF；机体里程计走 /odom_dog，由 lio_tf_bridge 转成 Nav2 footprint
                 'publish_odom_tf': False,
                 'lidar_x': 0.25,
                 'lidar_y': 0.0,

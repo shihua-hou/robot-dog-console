@@ -1,22 +1,33 @@
 [Unit]
-Description=Steel-bounce dog web console (HTTP 8080 + web_ops 8090 + rosbridge 9090)
+Description=Steel-bounce dog web console watchdog (HTTP 8080 + web_ops 8090 + rosbridge 9090)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
 User=linaro
 Group=linaro
 WorkingDirectory=/home/linaro/robot_ws
 Environment=HOME=/home/linaro
 Environment=ROS_HOME=/tmp/ros_home
 Environment=PYTHONUNBUFFERED=1
-# 等 WLAN 起来；失败也继续（有线也能开页）
-ExecStartPre=/bin/sleep 8
-ExecStart=/home/linaro/robot_ws/scripts/start_web_console.sh
+# 网页控制台尽量别被 OOM 先杀
+OOMScoreAdjust=-400
+ExecStartPre=/bin/mkdir -p /tmp/ros_home/log
+ExecStart=/usr/bin/python3 /home/linaro/robot_ws/scripts/web_console_watchdog.py
 ExecStop=/home/linaro/robot_ws/scripts/stop_web_console.sh
-TimeoutStartSec=120
+Restart=always
+RestartSec=3
+# KillMode=process (不是 mixed/control-group)：这个 service 的 cgroup 里除了它
+# 自己管的三件套(8080/8090/9090)，还挂着 web_ops_node.py 用 subprocess 间接拉起
+# 的 FAST-LIO/建图预览/Nav2/auto_relocalize 等——它们只是恰好在同一个 cgroup
+# 里，跟这个 service 的生命周期毫无关系。mixed/control-group 在停止服务时会把
+# 整个 cgroup 扫一遍 SIGKILL，2026-09-28 实测：一次 systemctl restart 就把正在
+# 跑的建图整条链路杀了，FAST-LIO 没走到正常关闭流程，PCD 没保存，丢了一次建图。
+# 改成 process 后 systemd 只信号主进程本身，三件套的启停完全交给上面的
+# ExecStop 脚本（它已经是精确按名字 kill，不碰 FAST-LIO/Nav2）。
+KillMode=process
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target

@@ -17,6 +17,8 @@ def generate_launch_description():
                 'lidar_roll': 0.0,
                 'lidar_pitch': -0.7853981634,
                 'lidar_yaw': 0.0,
+                # 短时运动用狗机体里程计；LIO 只出激光 TF
+                'odom_source': 'dog',
             }],
         ),
         # Static body(livox) -> base_link (inverse of base_link->livox_frame).

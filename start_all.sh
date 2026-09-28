@@ -4,6 +4,15 @@
 #   bash start_all.sh mapping        → 传感器 + FAST-LIO + 预览（网页「开始建图」）
 #   bash start_all.sh localization   → 传感器 + FAST-LIO + TF 桥（导航用，无 map_building）
 #   bash start_all.sh sensors        → 同上默认
+#
+# 全程持有 flock：ensure_one() 的"查进程数→不够就起"两步之间有空窗，两次
+# 几乎同时的调用（网页双击、脚本和网页撞车、两个终端各跑一次）都会在空窗期
+# 各自判定"没在跑"然后各启动一份，叠出重复的 fastlio_mapping/map_building_node
+# 抢同一路雷达（2026-09-28 实测故障）。持锁串行化后，后到的调用会等前一个
+# 跑完这整个脚本再执行，那时候 ensure_one() 看到的就是真实状态了。
+exec 9>/tmp/start_all.sh.lock
+flock 9
+
 source /opt/ros/humble/setup.bash
 source /home/linaro/robot_ws/install/setup.bash
 
@@ -65,7 +74,11 @@ ensure_one() {
     proc_kill "$needle"
   fi
   echo "[start] $cmd"
-  nohup bash -c "$cmd" >"$log" 2>&1 &
+  # exec 9>&- 关掉继承来的锁 fd 再 exec 真正的长驻命令——不关的话 fastlio_mapping/
+  # livox 这些一直跑到会话结束的后台进程会一直攥着 fd 9，这把 flock 就永远不会
+  # 释放，后面任何一次 start_all.sh 调用都会在 flock 9 上死等（2026-09-28 实测：
+  # 加 flock 当天午后连续 4 次"开始建图"全部卡死，就是这个）。
+  nohup bash -c "exec 9>&-; $cmd" >"$log" 2>&1 &
   echo "  pid=$! → $log"
   sleep "$wait_s"
 }

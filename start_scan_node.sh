@@ -9,7 +9,7 @@ pkill -f 'nav2_tools.nav_scan_node' 2>/dev/null || true
 sleep 0.3
 nohup python3 -u /home/linaro/robot_ws/src/nav2_tools/nav2_tools/nav_scan_node.py \
   --ros-args \
-  -p z_min:=0.10 -p z_max:=1.0 \
+  -p z_min:=0.10 -p z_max:=1.20 \
   -p range_min:=0.20 -p range_max:=8.0 \
   -p angle_increment:=0.01 \
   > /tmp/scan_node.log 2>&1 &
