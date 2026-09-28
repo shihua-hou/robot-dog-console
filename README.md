@@ -2,6 +2,16 @@
 
 智元 D1 Edu-Ultra + Livox Mid-360S + FAST-LIO2 + Nav2 + Web 上位机。
 
+## 效果展示
+
+机器狗实物：
+
+![机器狗实物](images/robot-photo.jpg)
+
+网页控制台（主控 WLAN 访问 http://192.168.122.152:8080）：
+
+![钢镚控制台](images/console.jpg)
+
 ## 架构简述
 
 - **底盘**：`genisom_bridge` → AgiBot HighLevel SDK（`publish_odom_tf:=false`，导航时不发 SDK 里程计）
