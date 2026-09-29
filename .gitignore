@@ -11,9 +11,11 @@ log/
 *.bak
 *.bak_*
 
-# FAST-LIO runtime outputs (regenerated every mapping session, huge)
+# FAST-LIO / Super-LIO runtime outputs (regenerated every mapping session, huge)
 src/FAST_LIO/PCD/
 src/FAST_LIO/Log/
+src/SUPER_LIO/super_lio/map/
+src/SUPER_LIO/super_lio/logs/
 *.pcd
 
 # vendored upstream driver with its own git repo -- not tracked as submodule here
@@ -23,6 +25,12 @@ src/livox_ros_driver2/
 src/nav2_tools/map.pgm
 src/nav2_tools/map.png
 src/nav2_tools/map.yaml
+
+# local IDE / boot helpers (machine-specific)
+.cursor/
+.boot_mode
+frames_*.gv
+frames_*.pdf
 
 # OS/editor noise
 .DS_Store
