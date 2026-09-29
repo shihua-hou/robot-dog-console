@@ -8,7 +8,8 @@
  *      ask_manual: 网页弹窗——否=承认当前位姿并锁定；是=用户手动设姿后锁定
  *   4. locked 后: ≥0.60 健康；0.35~0.60 只更新置信度不重搜；
  *      <0.35 连续 N 次 → 再全图重定位，发布最高置信度位姿，回到 2/3
- *   5. 导航结束(reached/canceled/…)后停稳：若置信度 < post_nav_hit → 自动搜一次
+ *   5. 导航结束后自动纠偏默认关闭（post_nav_hit<=0）；开启时也仅当搜到
+ *      ≥min_black_hit 才下发 /initialpose，避免把正确终点拽到错误峰
  */
 #include <cmath>
 #include <cstdio>
@@ -61,8 +62,15 @@ public:
     watchdog_en_ = declare_parameter<bool>("watchdog_en", true);
     watchdog_sigma_ = declare_parameter<double>("watchdog_sigma", 0.08);
     watchdog_count_ = std::max(1, (int)declare_parameter<int>("watchdog_count", 3));
-    post_nav_hit_ = declare_parameter<double>("post_nav_hit", 0.55);
+    post_nav_hit_ = declare_parameter<double>("post_nav_hit", 0.0);  // <=0 关闭到点自动纠偏
     post_nav_settle_sec_ = declare_parameter<double>("post_nav_settle_sec", 1.5);
+    // 静止时局部激光↔地图微调（似然场小窗，类似轻量 scan-match / 回环，不是全图 NDT）
+    local_refine_en_ = declare_parameter<bool>("local_refine_en", false);
+    local_refine_period_sec_ = declare_parameter<double>("local_refine_period_sec", 2.5);
+    local_xy_radius_ = declare_parameter<double>("local_xy_radius", 0.30);
+    local_yaw_deg_ = declare_parameter<double>("local_yaw_deg", 12.0);
+    local_improve_ = declare_parameter<double>("local_improve", 0.05);
+    local_min_hit_ = declare_parameter<double>("local_min_hit", 0.65);
     num_threads_ = std::max(1, (int)declare_parameter<int>("num_threads", 4));
 
     map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
@@ -134,11 +142,14 @@ public:
 
     watchdog_timer_ = create_wall_timer(std::chrono::seconds(1),
                                         [this]() { tick(); });
+    last_local_refine_ = now() - rclcpp::Duration::from_seconds(30.0);
     publishStatus(watchdog_en_ ? "hold:0.000" : "need_manual");
     RCLCPP_INFO(get_logger(),
-        "重定位就绪: 手动「重定位」始终可用; auto_on_startup=%s watchdog=%s post_nav<%.0f%%",
-        auto_on_startup_ ? "on" : "off", watchdog_en_ ? "on" : "off",
-        post_nav_hit_ * 100.0);
+        "重定位就绪: 手动可用; auto_on_startup=%s watchdog=%s post_nav=%s local_refine=%s",
+        auto_on_startup_ ? "on" : "off",
+        watchdog_en_ ? "on" : "off",
+        post_nav_hit_ > 1e-6 ? "on" : "off",
+        local_refine_en_ ? "on" : "off");
   }
 
   void publishStatus(const std::string &s) {
@@ -175,7 +186,7 @@ private:
       publishStatus("need_manual");
     }
 
-    // 始终更新定位置信度显示；只有 watchdog_en 才允许自动重搜
+    // 始终更新定位置信度显示
     double bh = 0.0;
     const bool have = currentHit(bh);
     if (have) {
@@ -187,25 +198,31 @@ private:
       publishStatusHit("critical", last_hit_);
     }
 
-    if (!watchdog_en_) return;  // 手动模式：到此为止，不自动发 /initialpose
+    // 导航中绝不发 /initialpose；静止时做局部激光贴图微调（与 watchdog 开关无关）
     if (navigating_) {
       low_score_cnt_ = 0;
       post_nav_pending_ = false;
-      return;
+    } else {
+      maybeLocalRefine(have ? bh : last_hit_);
     }
 
-    // 导航结束后停稳：置信度仍偏低 → 自动全图搜一次（不受 45s cooldown 限制）
+    if (!watchdog_en_) return;  // 全图自动搜关闭；局部微调已在上方处理
+    if (navigating_) return;
+
+    // 导航结束后停稳：仅 post_nav_hit>0 时才自动搜；默认关闭，否则常把终点拽歪
     if (post_nav_pending_ && now() >= post_nav_ready_at_) {
       post_nav_pending_ = false;
-      double bh_post = have ? bh : last_hit_;
-      if (!have) currentHit(bh_post);
-      if (bh_post < post_nav_hit_ && phase_ != Phase::Searching) {
-        RCLCPP_WARN(get_logger(),
-            "导航结束置信度 %.1f%% <%.0f%%，自动纠偏",
-            bh_post * 100.0, post_nav_hit_ * 100.0);
-        Candidate c;
-        runRelocalize(c, false);
-        return;
+      if (post_nav_hit_ > 1e-6) {
+        double bh_post = have ? bh : last_hit_;
+        if (!have) currentHit(bh_post);
+        if (bh_post < post_nav_hit_ && phase_ != Phase::Searching) {
+          RCLCPP_WARN(get_logger(),
+              "导航结束置信度 %.1f%% <%.0f%%，自动纠偏",
+              bh_post * 100.0, post_nav_hit_ * 100.0);
+          Candidate c;
+          runRelocalize(c, false);
+          return;
+        }
       }
     }
 
@@ -304,7 +321,7 @@ private:
           "置信度 %.1f%% 在[%.0f%%,%.0f%%)，监测 %.0fs；到期未达标则请用户确认",
           hit * 100.0, reloc_trigger_hit_ * 100.0, min_black_hit_ * 100.0, mid_wait_sec_);
     } else {
-      // 首轮就 <0.35：已发最高位姿，直接请用户确认（再搜意义不大除非环境变了）
+      // 首轮就 <0.35：不下发弱 /initialpose，请用户确认
       phase_ = Phase::AskManual;
       publishStatusHit("ask_manual", hit);
       RCLCPP_WARN(get_logger(),
@@ -508,39 +525,141 @@ private:
         fine.x, fine.y, fine.yaw * 180 / M_PI, fine.black_hit * 100.0, dt,
         from_service ? " [服务]" : "");
 
-    geometry_msgs::msg::PoseWithCovarianceStamped msg;
-    msg.header.frame_id = "map";
-    msg.pose.pose.position.x = fine.x;
-    msg.pose.pose.position.y = fine.y;
-    msg.pose.pose.orientation.z = std::sin(fine.yaw / 2);
-    msg.pose.pose.orientation.w = std::cos(fine.yaw / 2);
-    msg.pose.covariance[0] = 0.25;
-    msg.pose.covariance[7] = 0.25;
-    msg.pose.covariance[35] = 0.25;
-    // stamp=0 → AMCL 用最新 TF，避免 now()/过期 LIO 时间导致 extrapolation。
-    msg.header.stamp.sec = 0;
-    msg.header.stamp.nanosec = 0;
-    for (int i = 0; i < 3; ++i) {
-      pose_pub_->publish(msg);
-      if (i < 2) rclcpp::sleep_for(std::chrono::milliseconds(30));
+    // 自动搜：必须 ≥min_black_hit 才灌 /initialpose（中等命中常是错误峰）。
+    // 手动服务：≥reloc_trigger_hit 也可下发（用户显式点了重定位）。
+    const double pub_min = from_service ? reloc_trigger_hit_ : min_black_hit_;
+    if (fine.black_hit >= pub_min) {
+      geometry_msgs::msg::PoseWithCovarianceStamped msg;
+      msg.header.frame_id = "map";
+      msg.pose.pose.position.x = fine.x;
+      msg.pose.pose.position.y = fine.y;
+      msg.pose.pose.orientation.z = std::sin(fine.yaw / 2);
+      msg.pose.pose.orientation.w = std::cos(fine.yaw / 2);
+      msg.pose.covariance[0] = 0.25;
+      msg.pose.covariance[7] = 0.25;
+      msg.pose.covariance[35] = 0.25;
+      // stamp=0 → AMCL 用最新 TF，避免 now()/过期时间导致 extrapolation。
+      msg.header.stamp.sec = 0;
+      msg.header.stamp.nanosec = 0;
+      for (int i = 0; i < 3; ++i) {
+        pose_pub_->publish(msg);
+        if (i < 2) rclcpp::sleep_for(std::chrono::milliseconds(30));
+      }
+      last_reloc_time_ = now();
+      RCLCPP_INFO(get_logger(),
+                  "已下发 /initialpose x=%.2f y=%.2f yaw=%.1f° (hit=%.1f%% %s)",
+                  fine.x, fine.y, fine.yaw * 180 / M_PI, fine.black_hit * 100.0,
+                  from_service ? "手动" : "自动");
+    } else {
+      RCLCPP_WARN(get_logger(),
+                  "置信度 %.1f%% <%.0f%%，不下发 /initialpose，请手动设姿",
+                  fine.black_hit * 100.0, pub_min * 100.0);
     }
-    last_reloc_time_ = now();
-    RCLCPP_INFO(get_logger(), "已下发 /initialpose x=%.2f y=%.2f yaw=%.1f° (stamp=0/latest)",
-                fine.x, fine.y, fine.yaw * 180 / M_PI);
 
     enterAfterReloc(fine.black_hit);
     return true;
   }
 
-  bool auto_on_startup_, watchdog_en_;
+  void maybeLocalRefine(double cur_hit) {
+    if (!local_refine_en_ || navigating_) return;
+    if (phase_ == Phase::Searching) return;
+    if (!field_ready_ || !haveScan()) return;
+    if ((now() - last_local_refine_).seconds() < local_refine_period_sec_) return;
+    if (cur_hit >= 0.88) return;
+
+    geometry_msgs::msg::TransformStamped tf;
+    try {
+      tf = tf_buffer_->lookupTransform("map", "base_footprint", tf2::TimePointZero);
+    } catch (const tf2::TransformException &) {
+      return;
+    }
+    const double cx = tf.transform.translation.x;
+    const double cy = tf.transform.translation.y;
+    const auto &q = tf.transform.rotation;
+    const double cyaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
+                                   1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+
+    if (have_last_pose_) {
+      const double dxy = std::hypot(cx - last_pose_x_, cy - last_pose_y_);
+      double dyaw = cyaw - last_pose_yaw_;
+      while (dyaw > M_PI) dyaw -= 2 * M_PI;
+      while (dyaw < -M_PI) dyaw += 2 * M_PI;
+      if (dxy > 0.04 || std::fabs(dyaw) > 3.0 * M_PI / 180.0) {
+        last_pose_x_ = cx; last_pose_y_ = cy; last_pose_yaw_ = cyaw;
+        still_count_ = 0;
+        return;
+      }
+      if (++still_count_ < 2) {
+        last_pose_x_ = cx; last_pose_y_ = cy; last_pose_yaw_ = cyaw;
+        return;
+      }
+    } else {
+      have_last_pose_ = true;
+      last_pose_x_ = cx; last_pose_y_ = cy; last_pose_yaw_ = cyaw;
+      still_count_ = 0;
+      return;
+    }
+    last_pose_x_ = cx; last_pose_y_ = cy; last_pose_yaw_ = cyaw;
+    last_local_refine_ = now();
+
+    auto pts = beams(700);
+    if (pts.size() < 30) return;
+
+    std::vector<std::pair<double, double>> pos;
+    const double step = 0.05;
+    for (double dx = -local_xy_radius_; dx <= local_xy_radius_ + 1e-9; dx += step)
+      for (double dy = -local_xy_radius_; dy <= local_xy_radius_ + 1e-9; dy += step)
+        pos.emplace_back(cx + dx, cy + dy);
+    std::vector<double> yaws;
+    const double yaw_lim = local_yaw_deg_ * M_PI / 180.0;
+    for (double da = -yaw_lim; da <= yaw_lim + 1e-9; da += 2.0 * M_PI / 180.0)
+      yaws.push_back(cyaw + da);
+
+    Candidate best = search(pos, yaws, pts, score_tight_);
+    best.black_hit = blackHitRatio(pts, best.x, best.y,
+                                   std::cos(best.yaw), std::sin(best.yaw));
+    if (best.black_hit < local_min_hit_) return;
+    if (best.black_hit < cur_hit + local_improve_) return;
+    if (std::hypot(best.x - cx, best.y - cy) > local_xy_radius_ + 1e-3) return;
+
+    geometry_msgs::msg::PoseWithCovarianceStamped msg;
+    msg.header.frame_id = "map";
+    msg.header.stamp.sec = 0;
+    msg.header.stamp.nanosec = 0;
+    msg.pose.pose.position.x = best.x;
+    msg.pose.pose.position.y = best.y;
+    msg.pose.pose.orientation.z = std::sin(best.yaw / 2);
+    msg.pose.pose.orientation.w = std::cos(best.yaw / 2);
+    msg.pose.covariance[0] = 0.05;
+    msg.pose.covariance[7] = 0.05;
+    msg.pose.covariance[35] = 0.05;
+    for (int i = 0; i < 2; ++i) {
+      pose_pub_->publish(msg);
+      if (i == 0) rclcpp::sleep_for(std::chrono::milliseconds(20));
+    }
+    last_hit_ = best.black_hit;
+    last_reloc_time_ = now();
+    RCLCPP_INFO(get_logger(),
+        "局部贴图微调: (%.2f,%.2f,%.1f°)→(%.2f,%.2f,%.1f°) hit %.1f%%→%.1f%%",
+        cx, cy, cyaw * 180 / M_PI, best.x, best.y, best.yaw * 180 / M_PI,
+        cur_hit * 100.0, best.black_hit * 100.0);
+    publishStatusHit("aligned", best.black_hit);
+  }
+
+  bool auto_on_startup_, watchdog_en_, local_refine_en_ = true;
   double accept_score_, min_black_hit_, reloc_trigger_hit_, mid_wait_sec_, reloc_cooldown_sec_;
   double sigma_, coarse_step_, coarse_yaw_step_;
   double max_beam_range_, min_clearance_, watchdog_sigma_;
   double post_nav_hit_, post_nav_settle_sec_;
+  double local_refine_period_sec_ = 2.5, local_xy_radius_ = 0.30, local_yaw_deg_ = 12.0;
+  double local_improve_ = 0.035, local_min_hit_ = 0.55;
   int num_threads_, watchdog_count_;
   bool field_ready_ = false;
   bool navigating_ = false;
   bool post_nav_pending_ = false;
+  bool have_last_pose_ = false;
+  double last_pose_x_ = 0, last_pose_y_ = 0, last_pose_yaw_ = 0;
+  int still_count_ = 0;
   Phase phase_ = Phase::Boot;
   int low_score_cnt_ = 0;
   bool ask_manual_shown_ = false;
@@ -548,6 +667,7 @@ private:
   rclcpp::Time last_reloc_time_{0, 0, RCL_ROS_TIME};
   rclcpp::Time mid_wait_start_{0, 0, RCL_ROS_TIME};
   rclcpp::Time post_nav_ready_at_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time last_local_refine_{0, 0, RCL_ROS_TIME};
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::TimerBase::SharedPtr watchdog_timer_;

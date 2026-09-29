@@ -16,6 +16,7 @@ TF: base_link -> livox_frame (静态外参);
 """
 import math
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -81,6 +82,10 @@ class GenisomBridge(Node):
 
         self._cmd_lock = threading.Lock()
         self._last_cmd_time = 0.0
+        self._last_cmd_wall = 0.0
+        self._cmd_nonzero = False
+        self.cmd_deadman_sec = float(
+            self.declare_parameter('cmd_deadman_sec', 0.55).value)
 
         self.get_logger().info(
             f'Connecting SDK: local={self.local_ip}:{self.local_port} dog={self.dog_ip}')
@@ -88,12 +93,14 @@ class GenisomBridge(Node):
         if not self.sdk.connected():
             self.get_logger().error('SDK checkConnect failed - bridge will retry on state timer')
 
-        best_effort = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+        # RELIABLE：与 rosbridge / web_ops 默认发布端匹配；BEST_EFFORT 会导致
+        # 部分发布端发现不相容，网页摇杆指令到不了狗。
+        cmd_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST, depth=5)
 
         self.sub_cmd_vel = self.create_subscription(
-            Twist, 'cmd_vel', self.cb_cmd_vel, best_effort)
+            Twist, 'cmd_vel', self.cb_cmd_vel, cmd_qos)
 
         self.pub_imu = self.create_publisher(Imu, 'imu/data_raw', 20)
         # 机体里程计始终发布，供导航短时运动；不发 TF，避免与 lio_tf_bridge 冲突
@@ -118,8 +125,11 @@ class GenisomBridge(Node):
                                 self._make_srv_cb(fn))
 
         self.create_timer(1.0 / max(1.0, float(self.state_rate)), self.cb_state)
+        # 遥控死区：超过 deadman 未收到 cmd_vel 则强制零速，防止网页/WiFi 丢松手包后继续走
+        self.create_timer(0.05, self.cb_cmd_deadman)
         self.get_logger().info(
-            f'genisom_bridge ready (publish_odom_tf={self.publish_odom_tf}, /odom_dog always on)')
+            f'genisom_bridge ready (publish_odom_tf={self.publish_odom_tf}, '
+            f'/odom_dog always on, cmd_deadman={self.cmd_deadman_sec:.2f}s)')
 
     def _publish_static_lidar_tf(self):
         t = TransformStamped()
@@ -152,15 +162,43 @@ class GenisomBridge(Node):
         return msg, q, p
 
     def cb_cmd_vel(self, msg: Twist):
+        # 零速必须立刻下发：WiFi 抖动时松手归零若被 cmd_min_interval 丢掉，
+        # 狗会一直执行上一次非零速度（用户反馈「松手还走」）。
+        is_stop = (
+            abs(msg.linear.x) < 1e-9
+            and abs(msg.linear.y) < 1e-9
+            and abs(msg.angular.z) < 1e-9)
         now = self.get_clock().now().nanoseconds * 1e-9
         with self._cmd_lock:
-            if now - self._last_cmd_time < self.cmd_min_interval:
+            if (not is_stop) and (now - self._last_cmd_time < self.cmd_min_interval):
                 return
             self._last_cmd_time = now
+            self._last_cmd_wall = time.monotonic()
+            self._cmd_nonzero = not is_stop
         try:
             self.sdk.move(msg.linear.x, msg.linear.y, msg.angular.z)
         except Exception as e:
             self.get_logger().warn(f'cmd_vel -> move failed: {e}')
+
+    def cb_cmd_deadman(self):
+        """遥控超时自动停车：前端漏发零速 / 图传占满 WiFi 时的最后一道保险。"""
+        if not self._cmd_nonzero:
+            return
+        if (time.monotonic() - self._last_cmd_wall) < self.cmd_deadman_sec:
+            return
+        with self._cmd_lock:
+            if not self._cmd_nonzero:
+                return
+            if (time.monotonic() - self._last_cmd_wall) < self.cmd_deadman_sec:
+                return
+            self._cmd_nonzero = False
+            self._last_cmd_time = self.get_clock().now().nanoseconds * 1e-9
+        try:
+            self.sdk.move(0.0, 0.0, 0.0)
+            self.get_logger().warn(
+                f'cmd_vel deadman ({self.cmd_deadman_sec:.2f}s) → force stop')
+        except Exception as e:
+            self.get_logger().warn(f'deadman stop failed: {e}')
 
     def cb_state(self):
         try:

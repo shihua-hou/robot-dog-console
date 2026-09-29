@@ -1,13 +1,13 @@
 #!/bin/bash
 # Idempotent bring-up.
 #   bash start_all.sh                → 仅传感器 (Livox + SDK 桥)，不开建图
-#   bash start_all.sh mapping        → 传感器 + FAST-LIO + 预览（网页「开始建图」）
-#   bash start_all.sh localization   → 传感器 + FAST-LIO + TF 桥（导航用，无 map_building）
+#   bash start_all.sh mapping        → 传感器 + Super-LIO + 预览（网页「开始建图」）
+#   bash start_all.sh localization   → 传感器 + Super-LIO + TF 桥（导航用，无 map_building）
 #   bash start_all.sh sensors        → 同上默认
 #
 # 全程持有 flock：ensure_one() 的"查进程数→不够就起"两步之间有空窗，两次
 # 几乎同时的调用（网页双击、脚本和网页撞车、两个终端各跑一次）都会在空窗期
-# 各自判定"没在跑"然后各启动一份，叠出重复的 fastlio_mapping/map_building_node
+# 各自判定"没在跑"然后各启动一份，叠出重复的 super_lio_node/map_building_node
 # 抢同一路雷达（2026-09-28 实测故障）。持锁串行化后，后到的调用会等前一个
 # 跑完这整个脚本再执行，那时候 ensure_one() 看到的就是真实状态了。
 exec 9>/tmp/start_all.sh.lock
@@ -74,7 +74,7 @@ ensure_one() {
     proc_kill "$needle"
   fi
   echo "[start] $cmd"
-  # exec 9>&- 关掉继承来的锁 fd 再 exec 真正的长驻命令——不关的话 fastlio_mapping/
+  # exec 9>&- 关掉继承来的锁 fd 再 exec 真正的长驻命令——不关的话 super_lio_node/
   # livox 这些一直跑到会话结束的后台进程会一直攥着 fd 9，这把 flock 就永远不会
   # 释放，后面任何一次 start_all.sh 调用都会在 flock 9 上死等（2026-09-28 实测：
   # 加 flock 当天午后连续 4 次"开始建图"全部卡死，就是这个）。
@@ -84,11 +84,11 @@ ensure_one() {
 }
 
 stop_mapping_nodes() {
-  echo "[stop] mapping nodes (FAST-LIO / map_building / lio_tf)"
+  echo "[stop] mapping nodes (Super-LIO / map_building / lio_tf)"
   proc_kill 'msg_MID360s_launch' >/dev/null 2>&1 || true
   # do NOT kill livox here
-  proc_kill 'fast_lio mapping.launch'
-  proc_kill 'fastlio_mapping'
+  proc_kill 'super_lio Livox_mid360'
+  proc_kill 'super_lio_node'
   proc_kill 'map_building.launch'
   proc_kill 'map_building_node'
   # lio_tf only needed with LIO; stop when not mapping
@@ -116,16 +116,32 @@ ensure_one 'genisom_bridge/genisom_bridge' \
   /tmp/bridge_run.log 3
 
 if [ "$WANT_LIO" -eq 1 ]; then
-  ensure_one 'fastlio_mapping' \
-    'ros2 launch fast_lio mapping.launch.py rviz:=false' \
-    /tmp/fastlio_run.log 5
+  # Super-LIO 与 relocation_node 互斥：两者都发 /lio/odom+/lio/cloud_world，
+  # 同时跑会让建图页 3D 狗位姿在两路估计间跳变。
+  if [ "$(proc_count relocation_node)" -gt 0 ]; then
+    echo "[stop] relocation_node (conflicts with super_lio_node)"
+    proc_kill 'dog_reloc.py'
+    proc_kill 'relocation_node'
+    sleep 0.5
+  fi
+  ensure_one 'super_lio_node' \
+    'ros2 launch super_lio Livox_mid360.py rviz:=false' \
+    /tmp/super_lio_run.log 5
+  # 导航/建图均默认 dog 里程计：LIO 作 odom 易漂，拖垮 AMCL map→odom
   ensure_one 'lio_tf_bridge/lio_tf_bridge' \
-    'ros2 launch lio_tf_bridge bridge.launch.py' \
+    'ros2 launch lio_tf_bridge bridge.launch.py odom_source:=dog' \
     /tmp/lio_bridge.log 2
   if [ "$WANT_MAPPING" -eq 1 ]; then
-    ensure_one 'map_building_node' \
-      'ros2 launch nav2_tools map_building.launch.py' \
-      /tmp/map_building.log 1
+  if [ "$(proc_count map_building_node)" -gt 1 ]; then
+    echo "[fix] map_building pile-up=$(proc_count map_building_node), keep one"
+    # 杀掉多余：保留最新 PID（proc_kill 全杀后再 ensure_one）
+    proc_kill 'map_building.launch'
+    proc_kill 'map_building_node'
+    sleep 0.5
+  fi
+  ensure_one 'map_building_node' \
+    'ros2 launch nav2_tools map_building.launch.py' \
+    /tmp/map_building.log 1
   else
     # 导航定位模式：不要挂着建图预览节点抢 CPU
     if [ "$(proc_count map_building_node)" -gt 0 ]; then
@@ -135,9 +151,9 @@ if [ "$WANT_LIO" -eq 1 ]; then
   fi
 else
   # 默认模式：确保建图没在后台偷跑
-  if [ "$(proc_count fastlio_mapping)" -gt 0 ] || [ "$(proc_count map_building_node)" -gt 0 ]; then
+  if [ "$(proc_count super_lio_node)" -gt 0 ] || [ "$(proc_count map_building_node)" -gt 0 ]; then
     stop_mapping_nodes
   fi
 fi
 
-echo "ALL READY mode=$MODE livox=$(proc_count livox_ros_driver2_node) lio=$(proc_count fastlio_mapping)"
+echo "ALL READY mode=$MODE livox=$(proc_count livox_ros_driver2_node) lio=$(proc_count super_lio_node)"

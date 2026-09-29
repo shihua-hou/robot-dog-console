@@ -17,7 +17,7 @@ def generate_launch_description():
                 'occ_min': 0.10,
                 'ground_z': 0.08,
                 'publish_rate': 2.0,
-                'frame_id': 'camera_init',
+                'frame_id': 'world',
             }],
         ),
     ])

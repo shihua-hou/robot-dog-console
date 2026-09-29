@@ -1,5 +1,5 @@
 #!/bin/bash
-# 修复导航：强制重启 LIO/TF（避免僵尸进程无 /Odometry），校平 /scan，贴墙重定位。
+# 修复导航：强制重启 LIO/TF（避免僵尸进程无 /lio/odom），校平 /scan，贴墙重定位。
 # 必须在板子本机跑，不要用 Cursor Agent 终端。
 set -e
 WS=/home/linaro/robot_ws
@@ -23,26 +23,26 @@ pkill -9 -f pointcloud_to_laserscan_node 2>/dev/null || true
 pkill -9 -f nav_scan_node.py 2>/dev/null || true
 sleep 1
 
-echo "[nav] FORCE restart FAST-LIO + lio_tf (clear stale TF / missing odom)..."
-pkill -9 -f 'fast_lio mapping.launch' 2>/dev/null || true
-pkill -9 -f fastlio_mapping 2>/dev/null || true
+echo "[nav] FORCE restart Super-LIO + lio_tf (clear stale TF / missing odom)..."
+pkill -9 -f 'super_lio Livox_mid360' 2>/dev/null || true
+pkill -9 -f super_lio_node 2>/dev/null || true
 pkill -9 -f 'lio_tf_bridge bridge.launch' 2>/dev/null || true
 pkill -9 -f 'lio_tf_bridge/lio_tf_bridge' 2>/dev/null || true
-pkill -9 -f body_to_base_link_static 2>/dev/null || true
+pkill -9 -f imu_to_base_link_static 2>/dev/null || true
 sleep 2
 bash "$WS/start_all.sh" localization
 sleep 5
 
-echo "[nav] check /Odometry /cloud_registered / TF..."
+echo "[nav] check /lio/odom /lio/cloud_world / TF..."
 for i in 1 2 3 4 5 6 7 8; do
-  if timeout 2 ros2 topic hz /Odometry 2>&1 | grep -q 'average rate'; then
+  if timeout 2 ros2 topic hz /lio/odom 2>&1 | grep -q 'average rate'; then
     break
   fi
-  echo "  wait Odometry ($i)..."
+  echo "  wait lio/odom ($i)..."
   sleep 1
 done
-timeout 5 ros2 topic hz /Odometry 2>&1 | head -4 || echo "WARN: no /Odometry"
-timeout 5 ros2 topic hz /cloud_registered 2>&1 | head -4 || echo "WARN: no /cloud_registered"
+timeout 5 ros2 topic hz /lio/odom 2>&1 | head -4 || echo "WARN: no /lio/odom"
+timeout 5 ros2 topic hz /lio/cloud_world 2>&1 | head -4 || echo "WARN: no /lio/cloud_world"
 # 等到 odom→base_footprint（lio_tf 收到里程计后才会发）
 for i in 1 2 3 4 5 6 7 8 9 10; do
   if timeout 2 ros2 run tf2_ros tf2_echo odom base_footprint 2>&1 | grep -q 'Translation'; then
@@ -83,7 +83,7 @@ nohup ros2 launch auto_relocalize auto_relocalize.launch.py \
 echo "reloc pid=$!"
 sleep 2
 
-echo "[nav] containers=$(pgrep -c -f component_container_isolated || echo 0) fastlio=$(pgrep -c -f fastlio_mapping || echo 0) scan=$(pgrep -c -f nav_scan_node || echo 0)"
+echo "[nav] containers=$(pgrep -c -f component_container_isolated || echo 0) super_lio=$(pgrep -c -f super_lio_node || echo 0) scan=$(pgrep -c -f nav_scan_node || echo 0)"
 echo "OK — 刷新网页后："
 echo "  1) 确认 Nav2 / LIO / 扫描都在跑"
 echo "  2) 点「设初始位姿」对准你所在位置与朝向 → 松手触发 ICP"

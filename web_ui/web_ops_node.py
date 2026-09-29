@@ -7,12 +7,12 @@ ROS 订阅(前端 -> 主控):
   /web/init_pose   geometry_msgs/Twist   linear.x=x linear.y=y angular.z=yaw(rad) -> /initialpose
   /web/start_nav2  std_msgs/Empty        启动 Nav2（默认 map.yaml）
   /web/stop_nav2   std_msgs/Empty        停止 Nav2
-  /web/mapping     std_msgs/Empty        确保 FAST-LIO2 建图链运行
+  /web/mapping     std_msgs/Empty        确保 Super-LIO 建图链运行
 
 ROS 发布(主控 -> 前端):
   /web/nav_status  std_msgs/String  idle|navigating|reached|aborted|canceled[:detail]
   /web/sys_status  std_msgs/String  JSON services + nav
-  /web/robot_pose  geometry_msgs/PoseStamped  map→base_link（网页画激光/箭头用；不依赖 TFClient）
+  /web/robot_pose  geometry_msgs/PoseStamped  map→base_footprint（网页画激光/机身用）
 
 HTTP API (端口 8090, CORS 开放):
   GET  /api/maps
@@ -33,6 +33,8 @@ HTTP API (端口 8090, CORS 开放):
   GET  /api/video/snapshot   -> 单帧 JPEG
   POST /api/restart_rosbridge
   POST /api/ctrl            -> {mode: APP|SDK} 停止/启动 genisom_bridge
+  POST /api/cmd_vel         -> {vx,vy,wz} 网页遥控（绕过 rosbridge）
+  POST /api/video/stop      -> 停止 ffmpeg 图传拉流（省 CPU）
 """
 import base64
 import json
@@ -54,7 +56,7 @@ from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 from geometry_msgs.msg import Twist, Quaternion, PoseWithCovarianceStamped, PoseStamped
 from std_msgs.msg import String, Empty, Float32MultiArray
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, BatteryState
 from nav_msgs.msg import OccupancyGrid
 from nav2_msgs.action import NavigateToPose
 from tf2_ros import Buffer, TransformListener
@@ -64,7 +66,8 @@ from rclpy.time import Time
 ROS_SETUP = '/opt/ros/humble/setup.bash'
 WS_SETUP = '/home/linaro/robot_ws/install/setup.bash'
 MAPS_DIR = '/home/linaro/robot_ws/maps'
-FASTLIO_PCD = '/home/linaro/robot_ws/src/FAST_LIO/PCD/scans.pcd'
+SUPERLIO_PCD = '/home/linaro/robot_ws/src/SUPER_LIO/super_lio/map/map.pcd'
+SUPERLIO_PCD_DIR = '/home/linaro/robot_ws/src/SUPER_LIO/super_lio/map'
 PCD2PGM = '/home/linaro/robot_ws/src/nav2_tools/nav2_tools/pcd2pgm.py'
 if not os.path.isfile(PCD2PGM):
     PCD2PGM = '/home/linaro/robot_ws/src/nav2_tools/pcd2pgm.py'
@@ -74,29 +77,169 @@ START_SCAN = '/home/linaro/robot_ws/start_scan_node.sh'
 # 狗身广角相机（AgiBot 文档）：有线网段 RTSP H.264
 DOG_RTSP = os.environ.get('DOG_RTSP', 'rtsp://192.168.168.168:8554/test')
 DOG_FRAME_JPG = '/tmp/dog_live.jpg'
-# 画质/帧率：宽边像素、目标帧率、JPEG 质量(2最好~31最差)
+# 默认档（无负载时的高清）；实际以 /api/video/profile 为准
 VIDEO_WIDTH = int(os.environ.get('DOG_VIDEO_WIDTH', '1280'))
-VIDEO_FPS = int(os.environ.get('DOG_VIDEO_FPS', '18'))
+VIDEO_FPS = int(os.environ.get('DOG_VIDEO_FPS', '15'))
 VIDEO_Q = int(os.environ.get('DOG_VIDEO_Q', '3'))
-_video_feeder = {'proc': None, 'lock': threading.Lock()}
+VIDEO_IDLE_SEC = float(os.environ.get('DOG_VIDEO_IDLE_SEC', '45'))
+# smooth=导航/建图时保流畅；balanced/best=空闲时按网络探测
+VIDEO_PROFILES = {
+    'smooth': {'width': 640, 'fps': 12, 'q': 5, 'label': '流畅'},
+    'balanced': {'width': 960, 'fps': 12, 'q': 4, 'label': '均衡'},
+    'best': {'width': 1280, 'fps': 15, 'q': 3, 'label': '高清'},
+}
+_video_feeder = {'proc': None, 'lock': threading.Lock(), 'last_use': 0.0}
+_video_profile = 'best'
+_video_cfg = dict(VIDEO_PROFILES['best'])
+# 遥控优先：stop 后一段时间内禁止再拉起 ffmpeg
+_video_block_until = 0.0
 
 
-def ensure_video_feeder():
-    """Keep one ffmpeg writing latest JPEG for fast snapshot / polling."""
+def _ffmpeg_dog_live_pids():
+    """所有写 /tmp/dog_live.jpg 的 ffmpeg（含 web_ops 重启后的孤儿）。"""
+    out = []
+    me = os.getpid()
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == me:
+            continue
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                cmd = f.read().replace(b'\0', b' ').decode('utf-8', 'ignore')
+        except Exception:
+            continue
+        if 'ffmpeg' in cmd and 'dog_live.jpg' in cmd:
+            out.append(pid)
+    return out
+
+
+def stop_video_feeder(block_sec=20.0):
+    global _video_block_until
     with _video_feeder['lock']:
+        if block_sec and block_sec > 0:
+            _video_block_until = max(_video_block_until, time.monotonic() + float(block_sec))
         proc = _video_feeder['proc']
-        if proc is not None and proc.poll() is None:
-            return True
-        # 清理残留拉流进程，保证只留一个
-        for pid in proc_pids('dog_live.jpg'):
+        _video_feeder['proc'] = None
+        for pid in _ffmpeg_dog_live_pids():
             try:
                 os.kill(pid, signal.SIGTERM)
             except Exception:
                 pass
-        time.sleep(0.15)
         try:
-            if proc is not None:
+            if proc is not None and proc.poll() is None:
                 os.killpg(proc.pid, signal.SIGTERM)
+        except Exception:
+            pass
+    time.sleep(0.05)
+    for pid in _ffmpeg_dog_live_pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
+def video_stack_busy():
+    """建图/导航/LIO 占核时，禁止高清图传把网页拖死。"""
+    if proc_alive('component_container_isolated'):
+        return True
+    if proc_alive('map_building_node'):
+        return True
+    try:
+        if _mapping_session:
+            return True
+    except NameError:
+        pass
+    # 仅定位用的 Super-LIO 也很重，运控只能走流畅档
+    if proc_alive('super_lio_node'):
+        return True
+    return False
+
+
+def set_video_profile(name='best', rtt_ms=None):
+    """切换图传档位。smooth=流畅；balanced=均衡；best/auto=按 rtt_ms 选最优。"""
+    global _video_profile, _video_cfg
+    raw = (name or 'best').strip().lower()
+    if raw in ('fluent', 'fluid', 'low', 'lite'):
+        raw = 'smooth'
+    if raw in ('high', 'hd', 'quality'):
+        raw = 'best'
+    if raw in ('mid', 'medium', 'normal'):
+        raw = 'balanced'
+    forced = False
+    if video_stack_busy():
+        # 负载中强制流畅，忽略客户端要高清
+        raw = 'smooth'
+        forced = True
+    elif raw in ('auto', 'best'):
+        pick = 'best'
+        if rtt_ms is not None:
+            try:
+                rtt = float(rtt_ms)
+            except (TypeError, ValueError):
+                rtt = None
+            if rtt is not None:
+                if rtt > 1100:
+                    pick = 'smooth'
+                elif rtt > 600:
+                    pick = 'balanced'
+                else:
+                    pick = 'best'
+        if raw == 'auto':
+            raw = pick
+        else:
+            raw = 'balanced' if pick == 'smooth' else pick
+    if raw not in VIDEO_PROFILES:
+        raw = 'best'
+    new_cfg = dict(VIDEO_PROFILES[raw])
+    changed = (raw != _video_profile) or (new_cfg != _video_cfg)
+    _video_profile = raw
+    _video_cfg = new_cfg
+    restarted = False
+    if changed:
+        stop_video_feeder(block_sec=0)
+        restarted = bool(ensure_video_feeder())
+    return {
+        'ok': True,
+        'profile': _video_profile,
+        'label': VIDEO_PROFILES[_video_profile]['label'],
+        'width': _video_cfg['width'],
+        'fps': _video_cfg['fps'],
+        'q': _video_cfg['q'],
+        'restarted': bool(changed),
+        'feeder': restarted,
+        'rtt_ms': rtt_ms,
+        'forced_smooth': forced,
+    }
+
+
+def ensure_video_feeder():
+    """Keep one ffmpeg writing latest JPEG；仅在有人看视频且未被遥控暂停时。"""
+    global _video_block_until
+    with _video_feeder['lock']:
+        if time.monotonic() < _video_block_until:
+            return False
+        _video_feeder['last_use'] = time.monotonic()
+        proc = _video_feeder['proc']
+        live = _ffmpeg_dog_live_pids()
+        if proc is not None and proc.poll() is None and len(live) == 1 and proc.pid in live:
+            return True
+        # 清理全部残留，保证只留一个
+        for pid in live:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+        time.sleep(0.2)
+        for pid in _ffmpeg_dog_live_pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+        try:
+            if proc is not None and proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
         except Exception:
             pass
         try:
@@ -104,9 +247,12 @@ def ensure_video_feeder():
                 os.remove(DOG_FRAME_JPG)
         except Exception:
             pass
-        w = max(640, min(1920, VIDEO_WIDTH))
-        fps = max(8, min(30, VIDEO_FPS))
-        q = max(2, min(12, VIDEO_Q))
+        if time.monotonic() < _video_block_until:
+            return False
+        cfg = _video_cfg or VIDEO_PROFILES['best']
+        w = max(320, min(1280, int(cfg.get('width', VIDEO_WIDTH))))
+        fps = max(5, min(20, int(cfg.get('fps', VIDEO_FPS))))
+        q = max(2, min(8, int(cfg.get('q', VIDEO_Q))))
         cmd = [
             'ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error',
             '-rtsp_transport', 'tcp',
@@ -124,10 +270,30 @@ def ensure_video_feeder():
             _video_feeder['proc'] = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL, preexec_fn=os.setsid)
+            _video_feeder['last_use'] = time.monotonic()
             return True
         except Exception:
             _video_feeder['proc'] = None
             return False
+
+
+def video_idle_reaper():
+    """无人看视频超过 VIDEO_IDLE_SEC 则停 ffmpeg，省 CPU。"""
+    while True:
+        time.sleep(5.0)
+        try:
+            with _video_feeder['lock']:
+                last = _video_feeder['last_use']
+                proc = _video_feeder['proc']
+            if last <= 0:
+                continue
+            if (time.monotonic() - last) < VIDEO_IDLE_SEC:
+                continue
+            if proc is None and not _ffmpeg_dog_live_pids():
+                continue
+            stop_video_feeder()
+        except Exception:
+            pass
 
 
 def read_live_frame(wait_sec=2.5):
@@ -262,6 +428,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._serve_map_preview(name)
             elif path == '/api/sysinfo':
                 self._send_json(sysinfo())
+            elif path == '/api/battery':
+                self._send_json(battery_json())
             elif path == '/api/mapping/status':
                 self._send_json(mapping_status())
             elif path == '/api/lidar_extrinsic':
@@ -305,6 +473,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(stop_nav2_api())
             elif path == '/api/nav2/relocalize':
                 self._send_json(call_relocalize())
+            elif path == '/api/nav2/global_relocalize':
+                self._send_json(global_relocalize())
             elif path == '/api/nav2/accept_pose':
                 self._send_json(accept_reloc_pose())
             elif path == '/api/nav2/reloc_mode':
@@ -316,6 +486,19 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(restart_rosbridge())
             elif path == '/api/ctrl':
                 self._send_json(set_ctrl_mode(body.get('mode', '')))
+            elif path == '/api/cmd_vel':
+                self._send_json(publish_cmd_vel(body))
+            elif path == '/api/video/stop':
+                # 运动页遥控短暂停图；建图页前端不再调此接口
+                stop_video_feeder(block_sec=6.0)
+                self._send_json({'ok': True, 'stopped': True, 'blocked_sec': 6})
+            elif path == '/api/video/resume':
+                global _video_block_until
+                _video_block_until = 0.0
+                self._send_json({'ok': True, 'resumed': True})
+            elif path == '/api/video/profile':
+                self._send_json(set_video_profile(
+                    body.get('profile', 'best'), body.get('rtt_ms')))
             else:
                 self._send_json({'error': 'not found'}, 404)
         except Exception as e:
@@ -360,6 +543,9 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _serve_mjpeg(self, rtsp_url):
         """Serve multipart MJPEG from live frame cache (browser-friendly)."""
+        if time.monotonic() < _video_block_until:
+            self._send_json({'error': 'video paused for teleop', 'blocked': True}, 503)
+            return
         ensure_video_feeder()
         try:
             self.send_response(200)
@@ -371,8 +557,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.end_headers()
             last = b''
             idle = 0
-            interval = max(0.04, 1.0 / max(8, min(30, VIDEO_FPS)))
+            interval = max(0.04, 1.0 / max(8, min(30, int((_video_cfg or {}).get('fps', VIDEO_FPS)))))
             while idle < 100:
+                if time.monotonic() < _video_block_until:
+                    break
                 data = read_live_frame(wait_sec=0.5)
                 if not data:
                     idle += 1
@@ -398,14 +586,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             pass
 
     def _serve_snapshot(self, rtsp_url):
-        data = read_live_frame(wait_sec=2.5)
+        # 遥控 block 期间不要再起 ffmpeg（哪怕单帧），否则建图页轮询会打满 CPU
+        if time.monotonic() < _video_block_until:
+            self._send_json({'error': 'video paused for teleop', 'blocked': True}, 503)
+            return
+        data = read_live_frame(wait_sec=1.5)
         if not data:
+            if time.monotonic() < _video_block_until:
+                self._send_json({'error': 'video paused for teleop', 'blocked': True}, 503)
+                return
             cmd = [
                 'ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error',
                 '-rtsp_transport', 'tcp', '-fflags', 'nobuffer', '-flags', 'low_delay',
                 '-y', '-i', rtsp_url or DOG_RTSP,
-                '-frames:v', '1', '-q:v', str(max(2, min(12, VIDEO_Q))),
-                '-vf', f'scale={max(640, min(1920, VIDEO_WIDTH))}:-2',
+                '-frames:v', '1', '-q:v', str(max(2, min(8, int((_video_cfg or {}).get('q', VIDEO_Q))))),
+                '-vf', f'scale={max(320, min(1280, int((_video_cfg or {}).get("width", VIDEO_WIDTH))))}:-2',
                 '-f', 'image2pipe', '-vcodec', 'mjpeg', '-',
             ]
             try:
@@ -525,17 +720,72 @@ def delete_map(body):
     name = os.path.basename(body.get('name', ''))
     if not name.endswith('.pgm'):
         return {'ok': False, 'error': 'name must end .pgm'}
+    stem = name[:-4]
+    # 当前导航选中的图 / Nav2 正在加载的图：禁止删，避免「库里没了但系统还挂着旧图」
+    selected = body.get('selected') or body.get('sel_map') or ''
+    selected = os.path.basename(str(selected))
+    if selected.endswith(('.pgm', '.yaml')):
+        selected = selected.rsplit('.', 1)[0]
+    if selected and selected == stem:
+        return {'ok': False, 'error': '「%s」是当前导航地图，不能删除；请先换成其它图再删' % name}
+    cur = _nav2_current_map or ''
+    if cur and (os.path.basename(cur) == stem + '.yaml'
+                or os.path.basename(cur) == stem + '.pgm'):
+        return {'ok': False, 'error': 'Nav2 正在使用「%s」，请先关闭导航或换图后再删' % name}
     removed = []
     for suffix in ('.pgm', '.yaml'):
-        p = os.path.join(MAPS_DIR, name[:-4] + suffix)
+        p = os.path.join(MAPS_DIR, stem + suffix)
         if os.path.isfile(p):
             os.remove(p)
             removed.append(suffix)
+    if not removed:
+        return {'ok': False, 'error': '地图文件不存在'}
     return {'ok': True, 'removed': removed}
 
 
-def stop_fastlio(sig=signal.SIGINT):
-    pids = proc_pids('fastlio_mapping')
+def stop_relocation_node(sig=signal.SIGTERM):
+    """停掉先验重定位节点（与 super_lio_node 互斥，同发 /lio/odom）。"""
+    killed = []
+    for needle in ('relocation_node', 'dog_reloc.py'):
+        for pid in proc_pids(needle):
+            try:
+                os.kill(pid, sig)
+                killed.append(pid)
+            except Exception:
+                pass
+    return killed
+
+
+def collapse_map_building(keep_one=True):
+    """叠了多个 map_building_node 时只留最新一个（或全停）。"""
+    pids = sorted(proc_pids('map_building_node'))
+    launches = sorted(proc_pids('map_building.launch'))
+    if keep_one and len(pids) <= 1 and len(launches) <= 1:
+        return {'ok': True, 'kept': pids[:1], 'killed': []}
+    killed = []
+    # 先杀多余 launch，再杀多余 node
+    drop_l = launches[:-1] if (keep_one and launches) else launches
+    drop_n = pids[:-1] if (keep_one and pids) else pids
+    if not keep_one:
+        drop_l, drop_n = launches, pids
+    for pid in drop_l + drop_n:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+        except Exception:
+            pass
+    time.sleep(0.4)
+    for pid in drop_l + drop_n:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+    return {'ok': True, 'kept': ([] if not keep_one else sorted(proc_pids('map_building_node'))[-1:]),
+            'killed': killed}
+
+
+def stop_super_lio(sig=signal.SIGINT):
+    pids = proc_pids('super_lio_node')
     for pid in pids:
         try:
             os.kill(pid, sig)
@@ -544,19 +794,18 @@ def stop_fastlio(sig=signal.SIGINT):
     return pids
 
 
-PCD_DIR = os.path.dirname(FASTLIO_PCD)
+PCD_DIR = os.path.dirname(SUPERLIO_PCD)
 LIDAR_EXTRINSIC = '/home/linaro/robot_ws/config/lidar_extrinsic.yaml'
-
 
 def load_lidar_extrinsic():
     """Read pitch_down / roll / lidar_z for UI + pcd2pgm."""
     out = {
         'ok': True,
-        'pitch_down': 0.7853981634,  # dog-head Mid360 looking down ~45°
+        'pitch_down': 0.342586,  # dog-head Mid360 looking down ~19.6°
         'roll': 0.0,
         'lidar_z': 0.45,
-        'lidar_pitch': -0.7853981634,
-        'mount_pitch_down': 0.7853981634,
+        'lidar_pitch': -0.342586,
+        'mount_pitch_down': 0.342586,
         'source': 'default',
     }
     if not os.path.isfile(LIDAR_EXTRINSIC):
@@ -584,16 +833,26 @@ def load_lidar_extrinsic():
 
 
 def clear_pcd_cache():
-    """删除 FAST-LIO 上次留下的 PCD，避免旧云污染新图。"""
+    """删除 Super-LIO 上次留下的 PCD（map.pcd + map/PCD/scans_*.pcd），避免旧云污染新图。"""
     removed = []
     try:
-        if os.path.isdir(PCD_DIR):
-            for fn in os.listdir(PCD_DIR):
-                if fn.startswith('scans') and fn.endswith('.pcd'):
-                    p = os.path.join(PCD_DIR, fn)
+        if os.path.isdir(SUPERLIO_PCD_DIR):
+            for fn in os.listdir(SUPERLIO_PCD_DIR):
+                p = os.path.join(SUPERLIO_PCD_DIR, fn)
+                if fn == os.path.basename(SUPERLIO_PCD) or fn == 'PCD':
                     try:
-                        os.remove(p)
-                        removed.append(fn)
+                        if os.path.isdir(p):
+                            for sub in os.listdir(p):
+                                sp = os.path.join(p, sub)
+                                if sub.startswith('scans') and sub.endswith('.pcd'):
+                                    try:
+                                        os.remove(sp)
+                                        removed.append('PCD/' + sub)
+                                    except Exception:
+                                        pass
+                        else:
+                            os.remove(p)
+                            removed.append(fn)
                     except Exception:
                         pass
     except Exception as e:
@@ -602,143 +861,172 @@ def clear_pcd_cache():
 
 
 def pcd_ready():
-    """是否有可转换的 scans.pcd（体积足够）。"""
+    """是否有可转换的 map.pcd（体积足够）。"""
     try:
-        return os.path.isfile(FASTLIO_PCD) and os.path.getsize(FASTLIO_PCD) > 1024
+        return os.path.isfile(SUPERLIO_PCD) and os.path.getsize(SUPERLIO_PCD) > 1024
     except Exception:
         return False
 
 
 def mapping_status():
-    running = proc_alive('fastlio_mapping')
+    global _mapping_session, _mapping_session_known
+    running = proc_alive('super_lio_node')
+    building = proc_alive('map_building_node')
+    nav2 = proc_alive('component_container_isolated')
+    # 仅 web_ops 重启后、尚无显式 start/stop 时，用 LIO+预览推断「正在建图」
+    if (not _mapping_session_known and running and building and not nav2
+            and not _mapping_stopping):
+        _mapping_session = True
+        _mapping_session_known = True
+    if nav2 or _mapping_stopping:
+        session = False
+    else:
+        session = bool(_mapping_session)
     ready = pcd_ready()
     size = 0
     mtime = None
-    if os.path.isfile(FASTLIO_PCD):
+    if os.path.isfile(SUPERLIO_PCD):
         try:
-            size = os.path.getsize(FASTLIO_PCD)
-            mtime = time.strftime('%H:%M:%S', time.localtime(os.path.getmtime(FASTLIO_PCD)))
+            size = os.path.getsize(SUPERLIO_PCD)
+            mtime = time.strftime('%H:%M:%S', time.localtime(os.path.getmtime(SUPERLIO_PCD)))
         except Exception:
             pass
     return {
         'ok': True,
+        'session': session,
+        'stopping': bool(_mapping_stopping),
         'fastlio': running,
-        'map_building': proc_alive('map_building_node'),
+        'map_building': building,
         'pcd_ready': (not running) and ready,
         'pcd_exists': ready,
         'pcd_size': size,
         'pcd_mtime': mtime,
-        'can_start': not running and not proc_alive('component_container_isolated'),
-        'can_stop': running,
-        'can_save': (not running) and ready,
+        'can_start': not session and not running and not nav2 and not _mapping_stopping,
+        'can_stop': (session or running) and not _mapping_stopping,
+        'can_save': (not running) and ready and not _mapping_stopping,
     }
 
 
 def stop_mapping_keep_pcd():
-    """停止 FAST-LIO：先调 /map_save 落盘，再 SIGINT，等待 scans.pcd。"""
-    pids = proc_pids('fastlio_mapping')
-    if not pids:
-        return {
-            'ok': True, 'already_stopped': True,
-            'pcd_ready': pcd_ready(),
-            'pcd_size': os.path.getsize(FASTLIO_PCD) if os.path.isfile(FASTLIO_PCD) else 0,
-        }
-    # Ask node to flush PCD while still alive
+    """停止 Super-LIO：SIGINT 触发 saveMap() 落盘 map.pcd，再等待生成。"""
+    global _mapping_stopping
+    set_mapping_session(False)
+    _mapping_stopping = True
     try:
-        subprocess.run(
-            ['bash', '-lc',
-             'source /opt/ros/humble/setup.bash; source /home/linaro/robot_ws/install/setup.bash; '
-             'export ROS_HOME=/tmp/ros_home; '
-             'ros2 service call /map_save std_srvs/srv/Trigger "{}"'],
-            capture_output=True, text=True, timeout=20)
-    except Exception as e:
-        print('[stop_mapping] map_save call:', e)
+        pids = proc_pids('super_lio_node')
+        if not pids:
+            return {
+                'ok': True, 'already_stopped': True,
+                'pcd_ready': pcd_ready(),
+                'pcd_size': os.path.getsize(SUPERLIO_PCD) if os.path.isfile(SUPERLIO_PCD) else 0,
+            }
 
-    prev_mtime = os.path.getmtime(FASTLIO_PCD) if os.path.isfile(FASTLIO_PCD) else 0
-    stop_fastlio(signal.SIGINT)
-    saved = False
-    for _ in range(30):
-        if os.path.isfile(FASTLIO_PCD):
-            mt = os.path.getmtime(FASTLIO_PCD)
-            if mt > prev_mtime or (time.time() - mt) < 60:
-                time.sleep(0.5)
-                if os.path.getsize(FASTLIO_PCD) > 1024:
-                    saved = True
-                    break
-        time.sleep(0.5)
-    kill_pattern('map_building_node')
-    still = proc_pids('fastlio_mapping')
-    # Only force-kill if PCD already on disk; otherwise give a bit more time
-    if still and not saved:
-        time.sleep(2.0)
-        if os.path.isfile(FASTLIO_PCD) and os.path.getsize(FASTLIO_PCD) > 1024:
-            saved = True
-    for pid in still:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except Exception:
-            pass
-    return {
-        'ok': True,
-        'pcd_ready': pcd_ready(),
-        'pcd_saved': saved or pcd_ready(),
-        'pcd_size': os.path.getsize(FASTLIO_PCD) if os.path.isfile(FASTLIO_PCD) else 0,
-        'force_killed': bool(still),
-        'error': None if (saved or pcd_ready()) else '未生成 scans.pcd，请重新建图后再停止（需已编译含落盘的 FAST-LIO）',
-    }
+        prev_mtime = os.path.getmtime(SUPERLIO_PCD) if os.path.isfile(SUPERLIO_PCD) else 0
+        stop_super_lio(signal.SIGINT)
+        saved = False
+        for _ in range(30):
+            if os.path.isfile(SUPERLIO_PCD):
+                mt = os.path.getmtime(SUPERLIO_PCD)
+                if mt > prev_mtime or (time.time() - mt) < 60:
+                    time.sleep(0.5)
+                    if os.path.getsize(SUPERLIO_PCD) > 1024:
+                        saved = True
+                        break
+            time.sleep(0.5)
+        kill_pattern('map_building_node')
+        # 一并停掉 launch，避免子进程退出后被 launch 异常拉起
+        kill_pattern('Livox_mid360.py')
+        still = proc_pids('super_lio_node')
+        # Only force-kill if PCD already on disk; otherwise give a bit more time
+        if still and not saved:
+            time.sleep(2.0)
+            if os.path.isfile(SUPERLIO_PCD) and os.path.getsize(SUPERLIO_PCD) > 1024:
+                saved = True
+        for pid in still:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+        # 确保会话保持关闭（防止等待期间被其它逻辑改写）
+        set_mapping_session(False)
+        return {
+            'ok': True,
+            'pcd_ready': pcd_ready(),
+            'pcd_saved': saved or pcd_ready(),
+            'pcd_size': os.path.getsize(SUPERLIO_PCD) if os.path.isfile(SUPERLIO_PCD) else 0,
+            'force_killed': bool(still),
+            'error': None if (saved or pcd_ready()) else '未生成 map.pcd，请确认已在 livox_360.yaml 开启 lio.map.save_map 后重新建图',
+        }
+    finally:
+        _mapping_stopping = False
+        set_mapping_session(False)
 
 
 def start_mapping_session(body=None):
     """清理旧 PCD 后启动/确保建图链（幂等，不会叠多个 Livox）。
 
-    真正的幂等靠 fastlio_mapping/map_building_node 是否已存活来判断，但
+    真正的幂等靠 super_lio_node/map_building_node 是否已存活来判断，但
     run_bg() 是异步的——从"没看到进程"到"进程真的起来"之间有好几秒空窗。
     两次几乎同时的 /api/mapping/start 请求（双击、页面重试、脚本和网页撞车）
     都会在这个空窗里各自判定"没在跑"然后各起一份 start_all.sh mapping，
     而 start_all.sh 自己的 ensure_one() 也是同样的检查-再启动，两边一起
-    竞态就会叠出两个 fastlio_mapping + 两个 map_building_node 抢同一路雷达，
+    竞态就会叠出两个 super_lio_node + 两个 map_building_node 抢同一路雷达，
     建图直接乱掉（这次排查到的真实故障)。用一把进程内锁把"决定要不要启动"
     这段收窄到互斥执行，第二个请求要么等第一个判定完直接复用，要么在第一个
     还没判定完时立刻被拒绝，不会再有两边同时通过检查的窗口。
     """
     global _mapping_starting
     with _mapping_lock:
+        if _mapping_stopping:
+            return {'ok': False, 'error': '正在停止建图，请稍候'}
         if _mapping_starting:
             return {'ok': False, 'error': '建图正在启动中，请稍候'}
         if proc_alive('component_container_isolated'):
             return {'ok': False, 'error': '请先关闭导航'}
-        # 若已在建图，仅确保预览
-        if proc_alive('fastlio_mapping'):
+        # 与 relocation_node 互斥，否则 /lio/odom 双源导致建图页狗位姿跳变
+        if proc_alive('relocation_node'):
+            stop_relocation_node()
+            time.sleep(0.8)
+        # 若已在建图，仅确保预览（并压扁叠出来的多个 map_building）
+        if proc_alive('super_lio_node'):
+            set_mapping_session(True)
+            collapse_map_building(keep_one=True)
             if not proc_alive('map_building_node'):
                 run_bg(
                     'ros2 launch nav2_tools map_building.launch.py',
                     '/tmp/map_building.log')
-            return {'ok': True, 'already_running': True, 'cleared': []}
+            return {'ok': True, 'already_running': True, 'cleared': [], 'session': True}
         _mapping_starting = True
     try:
         cleared = clear_pcd_cache()
+        # 再清一次，防止锁外窗口又被 start_reloc 拉起
+        stop_relocation_node()
+        collapse_map_building(keep_one=False)
         # start_all.sh is idempotent: collapses duplicate Livox/LIO first
         run_bg(f'bash {START_ALL} mapping', '/tmp/mapping.log')
-        # 等 start_all.sh 里的 ensure_one() 真正把 fastlio_mapping 跑起来再放锁，
+        # 等 start_all.sh 里的 ensure_one() 真正把 super_lio_node 跑起来再放锁，
         # 覆盖掉 run_bg() 异步返回到进程实际存活之间的那段窗口。
         for _ in range(30):
-            if proc_alive('fastlio_mapping'):
+            if proc_alive('super_lio_node'):
                 break
             time.sleep(0.5)
-        return {'ok': True, 'started': True, 'cleared': cleared.get('removed', [])}
+        set_mapping_session(True)
+        collapse_map_building(keep_one=True)
+        return {'ok': True, 'started': True, 'cleared': cleared.get('removed', []), 'session': True}
     finally:
         _mapping_starting = False
 
 
 def discard_mapping():
-    """Stop FAST-LIO without converting PCD to a map."""
-    pids = stop_fastlio(signal.SIGINT)
+    """Stop Super-LIO without converting PCD to a map."""
+    set_mapping_session(False)
+    pids = stop_super_lio(signal.SIGINT)
     # Also stop map_building preview node so next session starts clean
     kill_pattern('map_building_node')
     time.sleep(0.5)
     if pids:
         # Force if still alive
-        still = proc_pids('fastlio_mapping')
+        still = proc_pids('super_lio_node')
         for pid in still:
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -748,7 +1036,7 @@ def discard_mapping():
 
 
 def save_mapping(body):
-    """保存建图：SIGINT fastlio -> 等 PCD -> pcd2pgm -> maps/<name>.pgm+yaml"""
+    """保存建图：SIGINT super_lio -> 等 map.pcd -> pcd2pgm -> maps/<name>.pgm+yaml"""
     name = os.path.basename(body.get('name', 'map'))
     if name in ('__discard__', 'discard', ''):
         return discard_mapping()
@@ -756,17 +1044,18 @@ def save_mapping(body):
         name = name.rsplit('.', 1)[0]
     name = re.sub(r'[^\w\-]+', '_', name) or 'map'
 
-    pids = proc_pids('fastlio_mapping')
+    set_mapping_session(False)
+    pids = proc_pids('super_lio_node')
     if not pids:
-        if os.path.isfile(FASTLIO_PCD):
+        if os.path.isfile(SUPERLIO_PCD):
             return run_pcd2pgm(name)
-        return {'ok': False, 'error': 'fastlio 未运行且无 PCD 可转换'}
+        return {'ok': False, 'error': 'super_lio 未运行且无 PCD 可转换'}
 
     # Remember mtime before kill so we wait for a fresh PCD
-    prev_mtime = os.path.getmtime(FASTLIO_PCD) if os.path.isfile(FASTLIO_PCD) else 0
-    stop_fastlio(signal.SIGINT)
+    prev_mtime = os.path.getmtime(SUPERLIO_PCD) if os.path.isfile(SUPERLIO_PCD) else 0
+    stop_super_lio(signal.SIGINT)
 
-    pcd_path = FASTLIO_PCD
+    pcd_path = SUPERLIO_PCD
     saved = False
     for _ in range(20):
         if os.path.isfile(pcd_path):
@@ -781,26 +1070,39 @@ def save_mapping(body):
 
     kill_pattern('map_building_node')
     if not saved and not os.path.isfile(pcd_path):
-        return {'ok': False, 'error': 'FAST-LIO 已停止但未生成 PCD'}
+        return {'ok': False, 'error': 'Super-LIO 已停止但未生成 map.pcd'}
     return run_pcd2pgm(name, pcd_path)
 
 
-def run_pcd2pgm(name, pcd_path=FASTLIO_PCD):
+def run_pcd2pgm(name, pcd_path=SUPERLIO_PCD):
+    import tempfile
+    import shutil
     os.makedirs(MAPS_DIR, exist_ok=True)
     out_base = os.path.join(MAPS_DIR, name)
-    ex = load_lidar_extrinsic()
+    overwritten = os.path.isfile(out_base + '.pgm') or os.path.isfile(out_base + '.yaml')
     # 大 PCD（建图走久会到 GB 级）必须体素降采样，否则 python 列表 OOM → 被杀 →「pgm not written」
     try:
         pcd_sz = os.path.getsize(pcd_path) if os.path.isfile(pcd_path) else 0
     except OSError:
         pcd_sz = 0
+    # PCD 过旧时多半是上一次建图残留：仍允许转换，但打标给前端提示
+    pcd_age = None
+    try:
+        pcd_age = time.time() - os.path.getmtime(pcd_path)
+    except OSError:
+        pass
     voxel = '0.05' if pcd_sz > 200 * 1024 * 1024 else '0.04'
     timeout = 600 if pcd_sz > 400 * 1024 * 1024 else 300
+    # 先写到临时目录再原子替换，避免转换失败时留下半截/旧图混用
+    tmp_dir = tempfile.mkdtemp(prefix='pcd2pgm_', dir=MAPS_DIR)
+    tmp_base = os.path.join(tmp_dir, name)
     cmd = [
-        'python3', PCD2PGM, pcd_path, out_base,
-        '--pitch-down', str(ex.get('pitch_down', 0.7853981634)),
-        '--roll', str(ex.get('roll', 0.0)),
-        '--lidar-z', str(ex.get('lidar_z', 0.0) or 0.0),
+        'python3', PCD2PGM, pcd_path, tmp_base,
+        # Super-LIO 的 map.pcd 在重力对齐的 world 系（z 向上），
+        # 期望地平面法向量为 +Z，故 pitch_down/roll/lidar_z 都取 0（由 RANSAC 精修高度）。
+        '--pitch-down', '0',
+        '--roll', '0',
+        '--lidar-z', '0',
         '--z-min', '0.10', '--z-max', '1.0',
         '--occ-min', '0.12', '--occ-pts', '8',
         '--free-pts', '1', '--ground-min-z', '-0.15',
@@ -811,9 +1113,26 @@ def run_pcd2pgm(name, pcd_path=FASTLIO_PCD):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         log = (r.stdout + r.stderr).strip()
-        ok = os.path.isfile(out_base + '.pgm')
+        tmp_pgm = tmp_base + '.pgm'
+        tmp_yaml = tmp_base + '.yaml'
+        ok = os.path.isfile(tmp_pgm) and os.path.isfile(tmp_yaml)
         if ok:
-            return {'ok': True, 'name': name + '.pgm', 'log': log[-2000:], 'error': None}
+            for suf in ('.pgm', '.yaml'):
+                os.replace(tmp_base + suf, out_base + suf)
+            # 若 Nav2 正挂着同名图，热加载新文件，避免界面仍显示内存里的旧栅格
+            reloaded = None
+            cur = _nav2_current_map or ''
+            if cur and os.path.basename(cur) == name + '.yaml':
+                reloaded = reload_nav_map({'map': name + '.yaml', 'reloc': False})
+            return {
+                'ok': True,
+                'name': name + '.pgm',
+                'overwritten': overwritten,
+                'pcd_age_sec': pcd_age,
+                'reloaded': reloaded,
+                'log': log[-2000:],
+                'error': None,
+            }
         err = log[-500:] if log else ''
         if r.returncode == -9 or r.returncode == 137:
             err = (err + ' | ').lstrip(' |') + (
@@ -826,6 +1145,11 @@ def run_pcd2pgm(name, pcd_path=FASTLIO_PCD):
         return {'ok': False, 'error': f'PCD→PGM 超时(>{timeout}s)，点云过大，请缩短建图再保存'}
     except Exception as e:
         return {'ok': False, 'error': str(e)}
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _scan_proc_alive():
@@ -852,28 +1176,93 @@ _nav2_current_map = None  # 幂等启动用: 同一张图已在跑就别重新�
 
 _mapping_lock = threading.Lock()
 _mapping_starting = False
+# 跨设备共享的「建图会话」：任一端点「开始建图」置位，停止/保存/丢弃清掉。
+# 另一端只靠本地 mappingSession 会永远显示空闲。
+_mapping_session = False
+# False=进程启动后尚未被 start/stop 显式写过；仅此时才允许用进程存活推断会话。
+# 否则停止过程中 LIO 还在落盘时 status 轮询会把 session 又推断成 True，前端再同步/自动恢复，表现为「关不掉」。
+_mapping_session_known = False
+_mapping_stopping = False
+
+
+def set_mapping_session(active):
+    global _mapping_session, _mapping_session_known
+    _mapping_session = bool(active)
+    _mapping_session_known = True
 
 
 _loc_heal_ts = 0.0
 
 
+def collapse_lio_tf_bridge(keep_one=True):
+    """多个 lio_tf_bridge 会抢发 odom→base_footprint，网页箭头/激光必晃。"""
+    bins, launches = [], []
+    me = os.getpid()
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == me:
+            continue
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                cmd = f.read().replace(b'\0', b' ').decode('utf-8', 'ignore')
+        except Exception:
+            continue
+        if 'extglob' in cmd or 'COMMAND_EXIT_CODE' in cmd:
+            continue
+        if 'lio_tf_bridge/lio_tf_bridge' in cmd:
+            bins.append(pid)
+        elif 'ros2 launch' in cmd and 'lio_tf_bridge' in cmd:
+            launches.append(pid)
+    if not bins and not launches:
+        return {'ok': True, 'kept': 0}
+    if keep_one and len(bins) <= 1 and len(launches) <= 1:
+        return {'ok': True, 'kept': len(bins)}
+    # 只留最新的一个 node + 其 launch；其余杀掉
+    bins.sort()
+    launches.sort()
+    keep_bin = bins[-1] if bins else None
+    keep_launch = launches[-1] if launches else None
+    for pid in bins + launches:
+        if pid in (keep_bin, keep_launch):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+    time.sleep(0.4)
+    return {'ok': True, 'kept': 1 if keep_bin else 0, 'killed': True}
+
+
 def ensure_localization_stack(force=False):
-    """Nav2 needs FAST-LIO (/Odometry,/cloud_registered) + lio_tf_bridge (odom→base_link)."""
+    """Nav2 需要 /lio/odom + lio_tf_bridge。
+
+    super_lio_node 与 relocation_node 二选一（都发 /lio/odom）；两者同时在会跳变。
+    """
     global _loc_heal_ts
-    need = (not proc_alive('fastlio_mapping') or not proc_alive('lio_tf_bridge')
+    collapse_lio_tf_bridge(keep_one=True)
+    if proc_alive('super_lio_node') and proc_alive('relocation_node'):
+        stop_relocation_node()
+        time.sleep(0.5)
+    has_lio = proc_alive('super_lio_node') or proc_alive('relocation_node')
+    need = (not has_lio or not proc_alive('lio_tf_bridge')
             or not proc_alive('livox_ros_driver2_node'))
     if need or force:
         # Cooldown avoids thrashing if LIO keeps dying (OOM / SIGKILL)
         now = time.time()
         if force or (now - _loc_heal_ts) > 8.0:
             _loc_heal_ts = now
+            # 统一走 Super-LIO localization；若现场要用 reloc，请先 start_reloc.sh
+            stop_relocation_node()
             run_bg(f'bash {START_ALL} localization', '/tmp/localization.log')
             for _ in range(30):
-                if proc_alive('fastlio_mapping') and proc_alive('lio_tf_bridge'):
+                if proc_alive('super_lio_node') and proc_alive('lio_tf_bridge'):
                     break
                 time.sleep(0.4)
+            collapse_lio_tf_bridge(keep_one=True)
     return {
-        'fastlio': proc_alive('fastlio_mapping'),
+        'fastlio': proc_alive('super_lio_node') or proc_alive('relocation_node'),
         'lio_tf': proc_alive('lio_tf_bridge'),
         'livox': proc_alive('livox_ros_driver2_node'),
     }
@@ -883,7 +1272,12 @@ def heal_nav_deps():
     """If Nav2 is up but LIO/scan/reloc died, bring them back (no dog motion)."""
     if not proc_alive('component_container_isolated'):
         return
-    if not proc_alive('fastlio_mapping') or not proc_alive('lio_tf_bridge'):
+    # 不论是否缺进程，先压扁叠出来的桥（双 TF 比缺桥更糟）
+    collapse_lio_tf_bridge(keep_one=True)
+    if proc_alive('super_lio_node') and proc_alive('relocation_node'):
+        stop_relocation_node()
+    has_lio = proc_alive('super_lio_node') or proc_alive('relocation_node')
+    if not has_lio or not proc_alive('lio_tf_bridge'):
         ensure_localization_stack()
     if not _scan_proc_alive():
         ensure_scan_node()
@@ -965,6 +1359,9 @@ def ensure_auto_relocalize():
 
 
 _web_ops_node = None  # set in main(); HTTP handlers use it to gate nav
+_cmd_vel_lock = threading.Lock()
+_cmd_vel_seq = 0  # 已接受的最大 seq；用于丢弃乱序晚到的非零指令
+_cmd_vel_stop_mono = 0.0  # 最近一次零速的 monotonic 时间
 
 
 def current_map_json():
@@ -1025,7 +1422,7 @@ def call_relocalize(timeout=35.0):
     """Call /relocalize Trigger service (blocking, for HTTP API)."""
     loc = ensure_localization_stack()
     if not loc.get('fastlio'):
-        return {'ok': False, 'error': 'FAST-LIO 未运行，无法重定位（先恢复激光里程计）', 'loc': loc}
+        return {'ok': False, 'error': 'Super-LIO 未运行，无法重定位（先恢复激光里程计）', 'loc': loc}
     ensure_scan_node()
     if not proc_alive('auto_relocalize'):
         if not ensure_auto_relocalize():
@@ -1071,6 +1468,54 @@ def call_relocalize(timeout=35.0):
         return {'ok': False, 'error': '重定位超时（地图/激光可能未就绪）'}
     except Exception as e:
         return {'ok': False, 'error': str(e)}
+
+
+def global_relocalize(timeout=20.0):
+    """3D-BBS 全局重定位：任意位置触发一次 -> /global_pose -> /initialpose -> reloc 精配准。"""
+    if not proc_alive('bbs3d_ros2_node'):
+        return {'ok': False, 'error': '全局重定位未启动（先把开机模式切到 greloc，或跑 start_global_reloc.sh）'}
+    for name in ('livox_cloud_to_pc2', 'bbs_global_pose_bridge'):
+        if not proc_alive(name):
+            return {'ok': False, 'error': f'{name} 未运行（start_global_reloc.sh）'}
+    trig = (
+        'source /opt/ros/humble/setup.bash && '
+        'source /home/linaro/robot_ws/install/setup.bash && '
+        'ros2 topic pub --once /bbs_localize std_msgs/msg/Bool "{data: true}"'
+    )
+    try:
+        subprocess.run(['bash', '-lc', trig], capture_output=True, text=True, timeout=8.0)
+    except Exception as e:
+        return {'ok': False, 'error': f'触发 3D-BBS 失败: {e}'}
+    score = None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(1.0)
+        try:
+            log = open('/tmp/bbs3d.log').read()[-4000:]
+        except Exception:
+            log = ''
+        m = re.findall(r'Localize: success \(score=(\d+)', log)
+        if m:
+            score = int(m[-1])
+            break
+    if score is None:
+        return {'ok': False, 'error': '3D-BBS 未成功（查 /tmp/bbs3d.log：地图/点云/IMU 是否就绪）'}
+    converged = False
+    for _ in range(8):
+        time.sleep(1.0)
+        try:
+            rlog = open('/tmp/reloc_run.log').read()[-6000:]
+        except Exception:
+            rlog = ''
+        if 'Converged Succeed' in rlog:
+            converged = True
+            break
+    if _web_ops_node is not None and converged:
+        _web_ops_node._loc_user_accepted = True
+        _web_ops_node._loc_aligned = True
+        _web_ops_node._loc_hit = max(_web_ops_node._loc_hit, 0.80)
+    return {'ok': bool(converged), 'score': score, 'converged': bool(converged),
+            'error': None if converged else '3D-BBS 成功但 reloc 未收敛，可再试一次'}
 
 
 def set_reloc_mode(body):
@@ -1158,6 +1603,40 @@ def start_nav2(body):
         _nav2_starting = False
 
 
+def _boot_relocalize_after_nav_start(settle_sec=3.5):
+    """启动导航后自动全图重定位一次（自检初始位姿），避免默认 (0,0) 乱指。"""
+    try:
+        time.sleep(max(1.0, float(settle_sec)))
+        for _ in range(20):
+            if (proc_alive('auto_relocalize')
+                    and proc_alive('component_container_isolated')
+                    and _scan_proc_alive()):
+                break
+            time.sleep(0.5)
+        # 再等 AMCL 真正订阅 /initialpose
+        time.sleep(1.5)
+        try:
+            open('/tmp/auto_relocalize.log', 'a').write(
+                '\n==== boot auto-relocalize after nav start ====\n')
+        except Exception:
+            pass
+        r = call_relocalize(timeout=40.0)
+        hit = r.get('hit')
+        msg = 'boot reloc ok' if r.get('ok') else ('boot reloc weak/fail: %s' % (r.get('error') or ''))
+        if hit is not None:
+            msg += ' hit=%.1f%%' % (hit * 100.0)
+        try:
+            open('/tmp/auto_relocalize.log', 'a').write(msg + '\n')
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            open('/tmp/auto_relocalize.log', 'a').write(
+                'boot reloc exception: %s\n' % e)
+        except Exception:
+            pass
+
+
 def _start_nav2_impl(body):
     m = body.get('map', '') or ''
     m = os.path.basename(m)
@@ -1188,22 +1667,29 @@ def _start_nav2_impl(body):
         ensure_scan_node()
         return {
             'ok': True, 'map': m, 'already_running': True,
-            'hint': '导航已经在跑（同一张图），未重新盲搜；定位不对就点"手动重定位"',
+            'hint': '导航已经在跑（同一张图）；定位不对请点「重定位」',
+            'auto_reloc': False,
         }
     # 建图/导航二选一，且要对称：之前这里是直接静默 kill_pattern('map_building_node')，
-    # 建图中点"启动导航"会在用户毫无察觉的情况下把建图预览杀掉（FAST-LIO 本身不停，
+     # 建图中点"启动导航"会在用户毫无察觉的情况下把建图预览杀掉（Super-LIO 本身不停，
     # 点云还在攒，但网页上突然看不到预览了）。现在跟 start_mapping_session() 的
     # "导航中拒绝建图"保持对称：建图中一律拒绝启动导航，不再替用户做这个决定。
     if proc_alive('map_building_node'):
         return {'ok': False, 'error': '正在建图中，请先「停止建图」或「保存地图」后再启动导航'}
     _nav2_current_map = map_path
 
+    # 新启导航：清掉上次的「定位已确认」，等自检重定位结果
+    if _web_ops_node is not None:
+        _web_ops_node._loc_user_accepted = False
+        _web_ops_node._loc_aligned = False
+        _web_ops_node._loc_hit = 0.0
+
     # Singleton Nav2 — previous double-launch left two navigate_to_pose servers
     stop_nav2_procs()
 
     loc = ensure_localization_stack()
     if not loc['fastlio']:
-        return {'ok': False, 'error': 'FAST-LIO 未能启动，导航需要里程计 TF（odom→base_link）',
+        return {'ok': False, 'error': 'Super-LIO 未能启动，导航需要里程计 TF（odom→base_link）',
                 'loc': loc}
 
     scan_ok = ensure_scan_node()
@@ -1226,10 +1712,16 @@ def _start_nav2_impl(body):
     # 后台催活：若 planner 仍在等 map→odom，AMCL set_initial_pose 会解；
     # 再兜底把 inactive 的 bt/velocity_smoother 拉起来。
     threading.Thread(target=_heal_nav2_lifecycle, args=(18.0,), daemon=True).start()
+    # 启动后自动重定位自检（不阻塞 HTTP 返回）
+    if reloc_ok:
+        threading.Thread(
+            target=_boot_relocalize_after_nav_start, args=(3.5,), daemon=True).start()
     return {
         'ok': True, 'map': m, 'scan': scan_ok, 'loc': loc,
         'auto_relocalize': reloc_ok,
-        'hint': '请点「重定位」或「设初始位姿」后再下目标',
+        'auto_reloc': bool(reloc_ok),
+        'hint': '已启动，正在自动重定位自检…' if reloc_ok
+                else '已启动，但重定位节点未起来，请手动点「重定位」',
     }
 
 
@@ -1304,6 +1796,56 @@ def restart_rosbridge():
     return {'ok': True}
 
 
+def publish_cmd_vel(body):
+    """网页摇杆主通路：HTTP → web_ops → /cmd_vel。
+
+    带单调 seq：高延迟 WiFi 下晚到的旧非零包不得覆盖更新的零速，
+    否则会出现「松手还走」。零速指令始终接受。
+    无 seq 的旧前端：零速后 1.5s 内拒绝其非零，避免未刷新的标签页抢控制。
+    """
+    global _cmd_vel_seq, _cmd_vel_stop_mono
+    n = _web_ops_node
+    if n is None or getattr(n, 'pub_cmd', None) is None:
+        return {'ok': False, 'error': 'web_ops not ready'}
+    try:
+        vx = float(body.get('vx', 0.0) or 0.0)
+        vy = float(body.get('vy', 0.0) or 0.0)
+        wz = float(body.get('wz', 0.0) or 0.0)
+        try:
+            seq = int(body.get('seq', 0) or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        is_stop = abs(vx) < 1e-9 and abs(vy) < 1e-9 and abs(wz) < 1e-9
+        now = time.monotonic()
+        with _cmd_vel_lock:
+            if not is_stop:
+                if seq > 0:
+                    if seq < _cmd_vel_seq:
+                        return {'ok': True, 'ignored': 'stale'}
+                    _cmd_vel_seq = seq
+                else:
+                    # 旧前端无 seq：若刚下过零速，丢掉以免「松手还走」
+                    if (now - _cmd_vel_stop_mono) < 1.5:
+                        return {'ok': True, 'ignored': 'post_stop'}
+                    if _cmd_vel_seq > 0:
+                        return {'ok': True, 'ignored': 'need_seq'}
+            else:
+                if seq >= _cmd_vel_seq:
+                    _cmd_vel_seq = seq
+                _cmd_vel_stop_mono = now
+            msg = Twist()
+            msg.linear.x = vx
+            msg.linear.y = vy
+            msg.angular.z = wz
+            n.pub_cmd.publish(msg)
+            if is_stop:
+                for _ in range(2):
+                    n.pub_cmd.publish(msg)
+        return {'ok': True, 'seq': _cmd_vel_seq, 'stop': is_stop}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
 def set_ctrl_mode(mode):
     """APP = 释放 SDK 给遥控器；SDK = 重新拉起 genisom_bridge。"""
     mode = (mode or '').strip().upper()
@@ -1369,15 +1911,77 @@ def service_status():
     return {
         'livox': proc_alive('livox_ros_driver2'),
         'bridge': proc_alive('genisom_bridge'),
-        'fastlio': proc_alive('fastlio_mapping'),
+        'fastlio': proc_alive('super_lio_node'),
         'lio_tf': proc_alive('lio_tf_bridge'),
         'map_building': proc_alive('map_building_node'),
         'scan': _scan_proc_alive(),
         'nav2': proc_alive('component_container_isolated'),
         'auto_relocalize': proc_alive('auto_relocalize'),
         'rosbridge': proc_alive('rosbridge_websocket'),
-        'webops': proc_alive('web_ops_node'),
+        # 本进程自己就是 web_ops；proc_alive 会跳过 me，这里直接 True
+        'webops': True,
     }
+
+
+def battery_json():
+    """电量兜底：后端缓存的 /battery_state，走 HTTP 给前端（不依赖 rosbridge 订阅）。"""
+    n = _web_ops_node
+    b = getattr(n, '_battery', None) if n is not None else None
+    age = None
+    if n is not None:
+        ts = getattr(n, '_battery_ts', 0.0) or 0.0
+        if ts:
+            age = round(time.monotonic() - ts, 1)
+    if b is None:
+        return {'ok': False, 'percentage': None, 'age_sec': age, 'sdk': False}
+    try:
+        return {
+            'ok': True,
+            'percentage': float(b.percentage),
+            'voltage': float(b.voltage),
+            'age_sec': age,
+            'sdk': age is not None and age < 5.0,
+        }
+    except Exception:
+        return {'ok': False, 'percentage': None, 'age_sec': age, 'sdk': False}
+
+
+_sdk_heal_ts = 0.0
+
+
+def heal_sdk_bridge():
+    """狗 SDK 掉线时电量/遥控全挂：进程还在但无 /battery_state → 重启 bridge。"""
+    global _sdk_heal_ts
+    n = _web_ops_node
+    if n is None:
+        return
+    # APP 模式故意无 bridge
+    if not proc_alive('genisom_bridge'):
+        return
+    ts = getattr(n, '_battery_ts', 0.0) or 0.0
+    # 启动宽限 25s；之后超过 12s 无电量则重启
+    up = time.monotonic() - getattr(n, '_boot_mono', time.monotonic())
+    if up < 25.0:
+        return
+    age = (time.monotonic() - ts) if ts else up
+    if age < 12.0:
+        return
+    now = time.monotonic()
+    if (now - _sdk_heal_ts) < 45.0:
+        return
+    _sdk_heal_ts = now
+    try:
+        n.get_logger().warn(
+            'SDK/battery stale (%.1fs) — restarting genisom_bridge' % age)
+    except Exception:
+        pass
+    # 复用 SDK 模式拉起（会先杀再启）
+    try:
+        set_ctrl_mode('SDK')
+    except Exception:
+        kill_pattern('genisom_bridge')
+        time.sleep(1.0)
+        run_bg('ros2 launch genisom_bridge bridge.launch.py', '/tmp/bridge_run.log')
 
 
 def _cpu_pct():
@@ -1453,9 +2057,11 @@ def sysinfo():
             info['wlan_ip'] = ''
         info['video_mjpeg'] = '/api/video/mjpeg'
         info['video_rtsp'] = DOG_RTSP
-        info['video_width'] = VIDEO_WIDTH
-        info['video_fps'] = VIDEO_FPS
-        info['video_q'] = VIDEO_Q
+        info['video_width'] = int((_video_cfg or {}).get('width', VIDEO_WIDTH))
+        info['video_fps'] = int((_video_cfg or {}).get('fps', VIDEO_FPS))
+        info['video_q'] = int((_video_cfg or {}).get('q', VIDEO_Q))
+        info['video_profile'] = _video_profile
+        info['video_profile_label'] = VIDEO_PROFILES.get(_video_profile, {}).get('label', '')
     except Exception as e:
         info['error'] = str(e)
     return info
@@ -1471,6 +2077,12 @@ class WebOpsNode(Node):
         self.sub_start_nav2 = self.create_subscription(Empty, '/web/start_nav2', self.cb_start_nav2, 10)
         self.sub_stop_nav2 = self.create_subscription(Empty, '/web/stop_nav2', self.cb_stop_nav2, 10)
         self.sub_mapping = self.create_subscription(Empty, '/web/mapping', self.cb_mapping, 10)
+
+        # 电量：后端缓存一份，走 /api/battery 让前端 HTTP 拉，不依赖 rosbridge 订阅
+        self._battery = None
+        self._battery_ts = 0.0
+        self._boot_mono = time.monotonic()
+        self.create_subscription(BatteryState, '/battery_state', self.cb_battery, 10)
 
         # TRANSIENT_LOCAL：重定位节点晚订阅也能拿到当前导航状态，避免导航中误触发重搜
         _nav_qos = QoSProfile(
@@ -1517,7 +2129,7 @@ class WebOpsNode(Node):
             String, '/relocalize_status', self.cb_reloc_status, 10)
 
         self.create_timer(1.0, self.cb_status_timer)
-        self.create_timer(0.1, self.cb_robot_pose_timer)
+        self.create_timer(0.05, self.cb_robot_pose_timer)
         self._set_nav_status('idle', '')
 
     def cb_reloc_status(self, msg):
@@ -1607,8 +2219,22 @@ class WebOpsNode(Node):
         msg.header.frame_id = 'map'
         msg.pose.position.x = t.transform.translation.x
         msg.pose.position.y = t.transform.translation.y
-        msg.pose.position.z = t.transform.translation.z
-        msg.pose.orientation = t.transform.rotation
+        msg.pose.position.z = 0.0
+        # 只用平面航向，避免 roll/pitch 渗进网页 yaw（箭头左右偏）
+        q = t.transform.rotation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        # 与 lio_tf_bridge 一致：用机体系 +X 投影，俯仰时更稳
+        # R*[1,0,0]
+        fx = 1 - 2 * (q.y * q.y + q.z * q.z)
+        fy = 2 * (q.x * q.y + q.z * q.w)
+        if fx * fx + fy * fy > 1e-8:
+            yaw = math.atan2(fy, fx)
+        msg.pose.orientation.x = 0.0
+        msg.pose.orientation.y = 0.0
+        msg.pose.orientation.z = math.sin(yaw * 0.5)
+        msg.pose.orientation.w = math.cos(yaw * 0.5)
         self.pub_robot_pose.publish(msg)
 
     def cb_nav_cmd(self, msg):
@@ -1616,6 +2242,13 @@ class WebOpsNode(Node):
         self.get_logger().info(f'nav_goal ({x:.2f}, {y:.2f}, yaw={math.degrees(yaw):.1f}deg)')
         if abs(x) < 0.02 and abs(y) < 0.02:
             return
+        # 网页/rosbridge 偶发连发同一目标 2～3 次 → cancel/preempt 风暴，加重假到达
+        now = time.time()
+        last = getattr(self, '_last_nav_cmd', None)
+        if last and (now - last[0]) < 0.6 and abs(last[1] - x) < 0.05 and abs(last[2] - y) < 0.05:
+            self.get_logger().info('nav_goal debounced (duplicate)')
+            return
+        self._last_nav_cmd = (now, x, y, yaw)
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
             self._set_nav_status('aborted', 'nav2_server_unavailable')
             return
@@ -1696,6 +2329,10 @@ class WebOpsNode(Node):
         except Exception:
             pass
 
+    def cb_battery(self, msg):
+        self._battery = msg
+        self._battery_ts = time.monotonic()
+
     def cb_init_pose(self, msg):
         x, y, yaw = msg.linear.x, msg.linear.y, msg.angular.z
         self.get_logger().info(f'init_pose ({x:.2f}, {y:.2f}, yaw {math.degrees(yaw):.0f}deg)')
@@ -1718,7 +2355,8 @@ class WebOpsNode(Node):
         self._loc_hit = max(self._loc_hit, 0.60)
 
     def cb_mapping(self, msg):
-        if not proc_alive('fastlio_mapping'):
+        set_mapping_session(True)
+        if not proc_alive('super_lio_node'):
             run_bg(f'bash {START_ALL} mapping', '/tmp/mapping.log')
             self.get_logger().info('mapping chain restarted via start_all.sh mapping')
         else:
@@ -1752,7 +2390,7 @@ class WebOpsNode(Node):
         # 但这里是 1Hz ROS 定时器回调，rclpy 默认单线程 executor：直接同步调用
         # heal_nav_deps() 会把这条回调，连带 /web/sys_status 的周期发布和
         # cb_nav_cmd（导航目标）等其它订阅回调，一起卡住最长 10+ 秒。
-        # 2026-09-28 实测：fastlio_mapping 内存涨到 4GB+ 被 OOM 杀掉后，
+        # 2026-09-28 实测：super_lio_node 内存涨到 4GB+ 被 OOM 杀掉后，
         # heal_nav_deps 反复触发这段阻塞重启轮询，其间 /web/nav_cmd 收不到——
         # 这就是「导航页设了目标机器人不走」的根因之一。
         # 挪到后台线程跑，_heal_lock 保证同一时刻只有一条在跑，不重叠。
@@ -1762,6 +2400,15 @@ class WebOpsNode(Node):
                     heal_nav_deps()
                 except Exception:
                     pass
+                try:
+                    heal_sdk_bridge()
+                except Exception:
+                    pass
+                try:
+                    if video_stack_busy() and _video_profile != 'smooth':
+                        set_video_profile('smooth')
+                except Exception:
+                    pass
                 finally:
                     self._heal_lock.release()
             threading.Thread(target=_heal, daemon=True).start()
@@ -1769,14 +2416,25 @@ class WebOpsNode(Node):
         if self.nav_state == 'navigating' and self.nav_goal_handle is None:
             if not self.nav_client.server_is_ready():
                 self._set_nav_status('idle', 'nav2_gone')
+        # 到达/取消/失败是瞬时事件：过几秒清回 idle，避免 1Hz 重发 + TRANSIENT_LOCAL
+        # 让网页反复弹「已到达目标」
+        if self.nav_state in ('reached', 'aborted', 'canceled'):
+            age = time.time() - getattr(self, '_nav_state_ts', 0)
+            if age > 2.5:
+                self._set_nav_status('idle', '')
         status = service_status()
         status['nav'] = self.nav_state
         self.pub_sys_status.publish(String(data=json.dumps(status)))
         # 周期性重发导航状态（配合 TRANSIENT_LOCAL），防止 reloc 漏订阅
-        self._set_nav_status(self.nav_state, '')
+        self._set_nav_status(self.nav_state, getattr(self, '_nav_detail', '') or '')
 
     def _set_nav_status(self, state, detail):
+        prev = getattr(self, 'nav_state', None)
         self.nav_state = state
+        self._nav_detail = detail or ''
+        if prev != state:
+            self._nav_state_ts = time.time()
+        # 同状态同 detail 的周期重发：只刷新 latch，内容不变
         self.pub_nav_status.publish(
             String(data=state if not detail else f'{state}:{detail}'))
 
@@ -1786,9 +2444,16 @@ def main(args=None):
     rclpy.init(args=args)
     node = WebOpsNode()
     _web_ops_node = node
+    # 启动时先清掉叠出来的重负载孤儿
+    try:
+        stop_video_feeder()
+        collapse_map_building(keep_one=True)
+    except Exception:
+        pass
     server = ThreadingHTTPServer(('0.0.0.0', 8090), ApiHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
+    threading.Thread(target=video_idle_reaper, daemon=True).start()
     node.get_logger().info('HTTP API listening on 8090')
     try:
         rclpy.spin(node)
@@ -1799,6 +2464,10 @@ def main(args=None):
         if type(e).__name__ != 'ExternalShutdownException':
             node.get_logger().error('spin stopped: %s' % e)
     finally:
+        try:
+            stop_video_feeder()
+        except Exception:
+            pass
         try:
             server.shutdown()
         except Exception:

@@ -1,10 +1,17 @@
-"""Launch lio_tf_bridge with lidar extrinsic params (must match genisom_bridge)."""
+"""Launch lio_tf_bridge with lidar extrinsic params (must match genisom_bridge).
+用法: ros2 launch lio_tf_bridge bridge.launch.py [odom_source:=dog|lio]
+"""
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    odom_source = LaunchConfiguration('odom_source')
     return LaunchDescription([
+        DeclareLaunchArgument('odom_source', default_value='dog',
+                              description='dog=底盘里程计(导航默认,抗漂); lio=Super-LIO(易漂,仅调试/重定位脚本)'),
         Node(
             package='lio_tf_bridge',
             executable='lio_tf_bridge',
@@ -14,25 +21,24 @@ def generate_launch_description():
                 'lidar_x': 0.25,
                 'lidar_y': 0.0,
                 'lidar_z': 0.45,
-                'lidar_roll': 0.0,
-                'lidar_pitch': -0.7853981634,
+                'lidar_roll': -0.013647,
+                'lidar_pitch': -0.342586,
                 'lidar_yaw': 0.0,
-                # 短时运动用狗机体里程计；LIO 只出激光 TF
-                'odom_source': 'dog',
+                'odom_source': odom_source,
             }],
         ),
-        # Static body(livox) -> base_link (inverse of base_link->livox_frame).
-        # FAST-LIO2 publishes camera_init->body where body == lidar frame, and
+        # Static imu -> base_link (inverse of base_link->imu).
+        # Super-LIO broadcasts world->imu (imu == IMU frame). lidar_imu extrinsic
+        # is identity rotation + ~4cm translation, so imu ≈ lidar frame.
         # genisom_bridge publishes base_link->livox_frame; this closes the tree.
-        # R^T * (-t) for T=(0.25,0,0.45) RPY=(0,-45deg,0) => (-0.4950, 0, -0.1414), RPY=(0, +45deg, 0).
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
-            name='body_to_base_link_static',
+            name='imu_to_base_link_static',
             arguments=[
-                '-0.4950', '0', '-0.1414',
-                '0', '0.7853981634', '0',
-                'body', 'base_link',
+                '-0.386638', '0.004638', '-0.339837',
+                '0.006724', '0.170453', '0.001163', '0.985342',
+                'imu', 'base_link',
             ],
         ),
     ])

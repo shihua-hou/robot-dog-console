@@ -406,8 +406,8 @@ def main():
     ap.add_argument('--z-max', type=float, default=1.40)
     ap.add_argument('--despeckle', type=int, default=2,
                     help='isolated occupied-cell removal passes (0=off)')
-    ap.add_argument('--pitch-down', type=float, default=0.7853981634,
-                    help='forward tilt rad (positive = looking down), Mid360 on dog head ~45°')
+    ap.add_argument('--pitch-down', type=float, default=0.342586,
+                    help='forward tilt rad (positive = looking down), Mid360 on dog head ~19.6°')
     ap.add_argument('--roll', type=float, default=0.0)
     ap.add_argument('--lidar-z', type=float, default=0.0,
                     help='if >0, use as ground height instead of RANSAC d')

@@ -92,23 +92,29 @@ def can_start(key: str) -> bool:
 
 
 def ensure_http() -> bool:
-    """静态页 :8080"""
-    if port_open(8080) and find_pids("http.server", "8080"):
+    """静态页 :8080（禁止缓存，避免平板一直用旧摇杆逻辑）"""
+    if port_open(8080) and (
+        find_pids("http.server", "8080") or find_pids("web_http_nocache.py")
+    ):
         return True
     if not can_start("http"):
         return False
     # 清掉僵死监听
-    for p in find_pids("http.server", "8080"):
+    for p in find_pids("http.server", "8080") + find_pids("web_http_nocache.py"):
         try:
             os.kill(p, signal.SIGKILL)
         except Exception:
             pass
     time.sleep(0.3)
     log("restart static HTTP :8080")
-    bash_bg(
-        f"exec python3 -m http.server 8080 --directory {WS}/web_ui",
-        "/tmp/web_http.log",
-    )
+    nocache = f"{WS}/scripts/web_http_nocache.py"
+    if os.path.isfile(nocache):
+        bash_bg(f"exec python3 {nocache}", "/tmp/web_http.log")
+    else:
+        bash_bg(
+            f"exec python3 -m http.server 8080 --directory {WS}/web_ui",
+            "/tmp/web_http.log",
+        )
     return False
 
 

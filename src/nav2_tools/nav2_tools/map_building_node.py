@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Accumulate /cloud_registered into a live OccupancyGrid on /map_building.
+"""Accumulate /lio/cloud_world into a live OccupancyGrid on /map_building.
 
-Used by the web UI during FAST-LIO2 mapping so the 2D preview is not stuck
+Used by the web UI during Super-LIO mapping so the 2D preview is not stuck
 waiting for Nav2's /map (which only exists after a PGM is loaded).
 """
 import math
@@ -46,7 +46,7 @@ class MapBuildingNode(Node):
         self.ground_z = self.declare_parameter('ground_z', 0.05).value
         self.publish_rate = self.declare_parameter('publish_rate', 2.0).value
         self.max_extent = self.declare_parameter('max_extent', 40.0).value
-        self.frame_id = self.declare_parameter('frame_id', 'camera_init').value
+        self.frame_id = self.declare_parameter('frame_id', 'world').value
 
         self._cells = {}
         self._dirty = False
@@ -57,7 +57,7 @@ class MapBuildingNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST, depth=2)
         self.sub = self.create_subscription(
-            PointCloud2, '/cloud_registered', self.cb_cloud, qos)
+            PointCloud2, '/lio/cloud_world', self.cb_cloud, qos)
         self.pub = self.create_publisher(OccupancyGrid, '/map_building', 1)
         self.create_timer(1.0 / max(0.5, self.publish_rate), self.cb_publish)
         self.get_logger().info(

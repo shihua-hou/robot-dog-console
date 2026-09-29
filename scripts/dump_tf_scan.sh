@@ -31,7 +31,7 @@ lis = TransformListener(buf, n)
 end = time.time() + 5
 while time.time() < end:
     rclpy.spin_once(n, timeout_sec=0.2)
-for a,b in [('odom','base_link'),('camera_init','body'),('odom','base_footprint'),('camera_init','base_link'),('map','odom'),('odom','camera_init')]:
+for a,b in [('odom','base_link'),('world','imu'),('odom','base_footprint'),('world','base_link'),('map','odom'),('odom','world')]:
     try:
         t = buf.lookup_transform(a,b,Time())
         tr=t.transform.translation
@@ -39,9 +39,9 @@ for a,b in [('odom','base_link'),('camera_init','body'),('odom','base_footprint'
     except Exception as e:
         print(f'FAIL {a}->{b}: {type(e).__name__}: {e}')
 state={'cloud':0,'scan':0,'odom':0}
-n.create_subscription(PointCloud2,'/cloud_registered',lambda _: state.__setitem__('cloud', state['cloud']+1),10)
+n.create_subscription(PointCloud2,'/lio/cloud_world',lambda _: state.__setitem__('cloud', state['cloud']+1),10)
 n.create_subscription(LaserScan,'/scan',lambda _: state.__setitem__('scan', state['scan']+1),10)
-n.create_subscription(Odometry,'/Odometry',lambda _: state.__setitem__('odom', state['odom']+1),10)
+n.create_subscription(Odometry,'/lio/odom',lambda _: state.__setitem__('odom', state['odom']+1),10)
 end=time.time()+4
 while time.time()<end:
     rclpy.spin_once(n, timeout_sec=0.2)
@@ -55,5 +55,5 @@ PY
 echo '==== scan log ===='
 cat /tmp/scan_node.log
 echo '==== procs ===='
-pgrep -af 'nav_scan|lio_tf|fastlio|auto_reloc' | grep -v grep | grep -v sandbox
+pgrep -af 'nav_scan|lio_tf|super_lio|auto_reloc' | grep -v grep | grep -v sandbox
 echo DONE

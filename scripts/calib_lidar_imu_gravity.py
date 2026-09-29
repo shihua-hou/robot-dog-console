@@ -5,7 +5,7 @@ Dog must stand still on flat ground. Uses /livox/imu (preferred) or
 /imu/data_raw. Gravity in the IMU frame gives "up"; recover pitch_down/roll
 (positive pitch_down = looking at ground).
 
-Optionally RANSAC-fit /livox/lidar (or /cloud_registered) for cross-check.
+Optionally RANSAC-fit /livox/lidar (or /lio/cloud_world) for cross-check.
 
 Writes config/lidar_extrinsic.yaml. Launch values:
   genisom / lio_tf: lidar_pitch = -pitch_down
